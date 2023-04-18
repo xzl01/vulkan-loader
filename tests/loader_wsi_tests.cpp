@@ -1,7 +1,7 @@
 /*
- * Copyright (c) 2021 The Khronos Group Inc.
- * Copyright (c) 2021 Valve Corporation
- * Copyright (c) 2021 LunarG, Inc.
+ * Copyright (c) 2021-2022 The Khronos Group Inc.
+ * Copyright (c) 2021-2022 Valve Corporation
+ * Copyright (c) 2021-2022 LunarG, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and/or associated documentation files (the "Materials"), to
@@ -27,256 +27,866 @@
 
 #include "test_environment.h"
 
-#if defined(VK_USE_PLATFORM_XLIB_KHR) || defined(VK_USE_PLATFORM_XCB_KHR)
-#include <X11/Xutil.h>
-#endif
-
-class RegressionTests : public ::testing::Test {
-   protected:
-    virtual void SetUp() { env = std::unique_ptr<SingleICDShim>(new SingleICDShim(TestICDDetails(TEST_ICD_PATH_VERSION_2))); }
-
-    virtual void TearDown() { env.reset(); }
-    std::unique_ptr<SingleICDShim> env;
-
-    int width = 100;
-    int height = 100;
-};
+class WsiTests : public ::testing::Test {};
 
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
 
-// MS-Windows event handling function:
-LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) { return DefWindowProcA(hWnd, uMsg, wParam, lParam); }
+// When ICD doesn't support the extension, create instance should fail
+TEST(WsiTests, CreateSurfaceWin32NoICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
 
-TEST_F(RegressionTests, CreateSurfaceWin32) {
-    auto& driver = env->get_test_icd();
-    driver.SetICDAPIVersion(VK_MAKE_VERSION(1, 0, 0));
-    driver.SetMinICDInterfaceVersion(5);
-    driver.AddInstanceExtension(Extension(VK_KHR_SURFACE_EXTENSION_NAME));
-    driver.AddInstanceExtension(Extension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME));
-    driver.enable_icd_wsi = true;
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate(VK_ERROR_EXTENSION_NOT_PRESENT);
 
-    InstWrapper inst{env->vulkan_functions};
-    auto inst_create_info = driver.GetVkInstanceCreateInfo();
-    ASSERT_EQ(CreateInst(inst, inst_create_info), VK_SUCCESS);
+    InstWrapper inst2{env.vulkan_functions};
+    inst2.CheckCreate();
 
-    WNDCLASSEX win_class;
-    const char* app_short_name = "loader_surface_test";
-    HINSTANCE h_instance = GetModuleHandle(nullptr);  // Windows Instance
-    HWND h_wnd = nullptr;                             // window handle
+    ASSERT_EQ(nullptr, env.vulkan_functions.vkGetInstanceProcAddr(inst2.inst, "vkCreateWin32SurfaceKHR"));
+}
 
-    // Initialize the window class structure:
-    win_class.cbSize = sizeof(WNDCLASSEX);
-    win_class.style = CS_HREDRAW | CS_VREDRAW;
-    win_class.lpfnWndProc = WndProc;
-    win_class.cbClsExtra = 0;
-    win_class.cbWndExtra = 0;
-    win_class.hInstance = h_instance;
-    win_class.hIcon = LoadIconA(nullptr, IDI_APPLICATION);
-    win_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    win_class.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
-    win_class.lpszMenuName = nullptr;
-    win_class.lpszClassName = app_short_name;
-    win_class.hIconSm = LoadIconA(nullptr, IDI_WINLOGO);
+// When ICD doesn't support the surface creation, the loader should handle it
+TEST(WsiTests, CreateSurfaceWin32NoICDCreateSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    cur_icd.enable_icd_wsi = false;
 
-    // Register window class:
-    EXPECT_TRUE(RegisterClassExA(&win_class) != NULL);
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
 
-    // Create window with the registered class:
-    RECT wr = {0, 0, width, height};
-    AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
-    h_wnd = CreateWindowExA(0,
-                            app_short_name,  // class name
-                            app_short_name,  // app name
-                            // WS_VISIBLE | WS_SYSMENU |
-                            WS_OVERLAPPEDWINDOW,  // window style
-                            width, height,        // x/y coords
-                            wr.right - wr.left,   // width
-                            wr.bottom - wr.top,   // height
-                            nullptr,              // handle to parent
-                            nullptr,              // handle to menu
-                            h_instance,           // hInstance
-                            nullptr);             // no extra parameters
-    EXPECT_TRUE(h_wnd != nullptr);
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    VkWin32SurfaceCreateInfoKHR surf_create_info{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateWin32SurfaceKHR(inst, &surf_create_info, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+    //    ASSERT_EQ(cur_icd.is_using_icd_wsi, UsingICDProvidedWSI::not_using);
 
-    VkSurfaceKHR surface{};
-    VkWin32SurfaceCreateInfoKHR surf_create_info{};
-    surf_create_info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
-    surf_create_info.hwnd = h_wnd;
-    surf_create_info.hinstance = h_instance;
-    ASSERT_EQ(VK_SUCCESS, env->vulkan_functions.vkCreateWin32SurfaceKHR(inst, &surf_create_info, nullptr, &surface));
+    env.vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+}
+
+// When ICD does support the surface creation, the loader should  delegat handle it to the ICD
+TEST(WsiTests, CreateSurfaceWin32ICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    cur_icd.enable_icd_wsi = true;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    VkWin32SurfaceCreateInfoKHR surf_create_info{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateWin32SurfaceKHR(inst, &surf_create_info, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+    //    ASSERT_EQ(cur_icd.is_using_icd_wsi, UsingICDProvidedWSI::not_using);
+
+    env.vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+}
+
+// Some drivers supporting vkCreateWin32SurfaceKHR, and at least one that doesn't
+TEST(WsiTests, CreateSurfaceWin32MixedICDSupport) {
+    FrameworkEnvironment env{};
+    for (uint32_t icd = 0; icd < 3; ++icd) {
+        Extension first_ext{VK_KHR_SURFACE_EXTENSION_NAME};
+        Extension second_ext{VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+        env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+        auto& cur_icd = env.get_test_icd(icd);
+        cur_icd.icd_api_version = VK_API_VERSION_1_0;
+        cur_icd.add_instance_extensions({first_ext, second_ext});
+        if (icd < 2) {
+            // Only enable ICD for first two
+            cur_icd.enable_icd_wsi = true;
+        }
+    }
+
+    InstWrapper instance(env.vulkan_functions);
+    instance.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    instance.CheckCreate();
+
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    VkWin32SurfaceCreateInfoKHR surf_create_info{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateWin32SurfaceKHR(instance.inst, &surf_create_info, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+    //    ASSERT_EQ(cur_icd.is_using_icd_wsi, UsingICDProvidedWSI::not_using);
+
+    env.vulkan_functions.vkDestroySurfaceKHR(instance.inst, surface, nullptr);
+}
+
+TEST(WsiTests, GetPhysicalDeviceWin32PresentNoICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    cur_icd.physical_devices.emplace_back("physical_device_0");
+    cur_icd.enable_icd_wsi = false;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions(
+        {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    uint32_t driver_count = 1;
+    VkPhysicalDevice physical_device;
+    ASSERT_EQ(VK_SUCCESS, inst->vkEnumeratePhysicalDevices(inst, &driver_count, &physical_device));
+    ASSERT_EQ(driver_count, 1U);
+
+    DebugUtilsWrapper log{inst};
+    CreateDebugUtilsMessenger(log);
+    auto res = env.vulkan_functions.vkGetPhysicalDeviceWin32PresentationSupportKHR(physical_device, 0);
+    ASSERT_EQ(res, VK_FALSE);
+    ASSERT_TRUE(log.find("ICD for selected physical device does not export vkGetPhysicalDeviceWin32PresentationSupportKHR!"));
+}
+
+TEST(WsiTests, GetPhysicalDeviceWin32PresentICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    cur_icd.physical_devices.emplace_back("physical_device_0");
+    cur_icd.enable_icd_wsi = true;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    uint32_t driver_count = 1;
+    VkPhysicalDevice physical_device;
+    ASSERT_EQ(VK_SUCCESS, inst->vkEnumeratePhysicalDevices(inst, &driver_count, &physical_device));
+    ASSERT_EQ(driver_count, 1U);
+
+    ASSERT_EQ(VK_TRUE, env.vulkan_functions.vkGetPhysicalDeviceWin32PresentationSupportKHR(physical_device, 0));
+}
+
+TEST(WsiTests, Win32GetPhysicalDeviceSurfaceSupportKHR) {
+    FrameworkEnvironment env{};
+    const uint32_t max_device_count = 4;
+    for (uint32_t icd = 0; icd < max_device_count; ++icd) {
+        Extension first_ext{VK_KHR_SURFACE_EXTENSION_NAME};
+        Extension second_ext{VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+        env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+        auto& cur_icd = env.get_test_icd(icd);
+        cur_icd.icd_api_version = VK_API_VERSION_1_0;
+        cur_icd.set_min_icd_interface_version(5);
+        cur_icd.add_instance_extensions({first_ext, second_ext});
+        std::string dev_name = "phys_dev_" + std::to_string(icd);
+        cur_icd.physical_devices.emplace_back(dev_name.c_str());
+        cur_icd.physical_devices.back().add_queue_family_properties({{VK_QUEUE_GRAPHICS_BIT, 1, 0, {1, 1, 1}}, true});
+        cur_icd.enable_icd_wsi = true;
+    }
+
+    InstWrapper instance(env.vulkan_functions);
+    instance.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME});
+    instance.CheckCreate();
+
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    VkWin32SurfaceCreateInfoKHR surf_create_info{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateWin32SurfaceKHR(instance.inst, &surf_create_info, nullptr, &surface));
     ASSERT_TRUE(surface != VK_NULL_HANDLE);
     //    ASSERT_EQ(driver.is_using_icd_wsi, UsingICDProvidedWSI::not_using);
 
-    env->vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
-    DestroyWindow(h_wnd);
-}
+    uint32_t device_count = max_device_count;
+    std::array<VkPhysicalDevice, max_device_count> phys_devs;
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkEnumeratePhysicalDevices(instance.inst, &device_count, phys_devs.data()));
+    ASSERT_EQ(device_count, max_device_count);
 
+    for (uint32_t pd = 0; pd < max_device_count; ++pd) {
+        VkBool32 supported = VK_FALSE;
+        ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkGetPhysicalDeviceSurfaceSupportKHR(phys_devs[pd], 0, surface, &supported));
+    }
+
+    env.vulkan_functions.vkDestroySurfaceKHR(instance.inst, surface, nullptr);
+}
 #endif
 
 #if defined(VK_USE_PLATFORM_XCB_KHR)
-TEST_F(RegressionTests, CreateSurfaceXCB) {
-    auto& driver = env->get_test_icd();
-    driver.SetICDAPIVersion(VK_MAKE_VERSION(1, 0, 0));
-    driver.SetMinICDInterfaceVersion(5);
-    driver.AddInstanceExtension(Extension(VK_KHR_SURFACE_EXTENSION_NAME));
-    driver.AddInstanceExtension(Extension(VK_KHR_XCB_SURFACE_EXTENSION_NAME));
-    driver.enable_icd_wsi = true;
+// When ICD doesn't support the extension, create instance should fail
+TEST(WsiTests, CreateSurfaceXCBNoICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.enable_icd_wsi = false;
 
-    InstWrapper inst{env->vulkan_functions};
-    auto inst_create_info = driver.GetVkInstanceCreateInfo();
-    ASSERT_EQ(CreateInst(inst, inst_create_info), VK_SUCCESS);
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate(VK_ERROR_EXTENSION_NOT_PRESENT);
 
-    xcb_connection_t* xcb_connection;
-    xcb_screen_t* xcb_screen;
-    xcb_window_t xcb_window;
+    InstWrapper inst2{env.vulkan_functions};
+    inst2.CheckCreate();
 
-    //--Init Connection--
-    const xcb_setup_t* setup;
-    xcb_screen_iterator_t iter;
-    int scr;
+    ASSERT_EQ(nullptr, env.vulkan_functions.vkGetInstanceProcAddr(inst2.inst, "vkCreateXcbSurfaceKHR"));
+}
 
-    // API guarantees non-null xcb_connection
-    xcb_connection = xcb_connect(nullptr, &scr);
-    int conn_error = xcb_connection_has_error(xcb_connection);
-    ASSERT_EQ(conn_error, 0);
+// When ICD doesn't support the surface creation, the loader should handle it
+TEST(WsiTests, CreateSurfaceXCBNoICDCreateSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    cur_icd.enable_icd_wsi = false;
 
-    setup = xcb_get_setup(xcb_connection);
-    iter = xcb_setup_roots_iterator(setup);
-    while (scr-- > 0) {
-        xcb_screen_next(&iter);
-    }
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
 
-    xcb_screen = iter.data;
+    VkXcbSurfaceCreateInfoKHR xcb_createInfo{VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR};
 
-    xcb_window = xcb_generate_id(xcb_connection);
-    xcb_create_window(xcb_connection, XCB_COPY_FROM_PARENT, xcb_window, xcb_screen->root, 0, 0, width, height, 0,
-                      XCB_WINDOW_CLASS_INPUT_OUTPUT, xcb_screen->root_visual, 0, nullptr);
-
-    xcb_intern_atom_cookie_t cookie = xcb_intern_atom(xcb_connection, 1, 12, "WM_PROTOCOLS");
-    xcb_intern_atom_reply_t* reply = xcb_intern_atom_reply(xcb_connection, cookie, 0);
-    free(reply);
-
-    VkXcbSurfaceCreateInfoKHR xcb_createInfo;
-    xcb_createInfo.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
-    xcb_createInfo.pNext = nullptr;
-    xcb_createInfo.flags = 0;
-    xcb_createInfo.connection = xcb_connection;
-    xcb_createInfo.window = xcb_window;
-
-    VkSurfaceKHR surface{};
-    ASSERT_EQ(VK_SUCCESS, env->vulkan_functions.vkCreateXcbSurfaceKHR(inst, &xcb_createInfo, nullptr, &surface));
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateXcbSurfaceKHR(inst, &xcb_createInfo, nullptr, &surface));
     ASSERT_TRUE(surface != VK_NULL_HANDLE);
 
-    env->vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+    env.vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+}
 
-    xcb_destroy_window(xcb_connection, xcb_window);
-    xcb_disconnect(xcb_connection);
+// When ICD does support the surface creation, the loader should  delegat handle it to the ICD
+TEST(WsiTests, CreateSurfaceXCBICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    cur_icd.enable_icd_wsi = true;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    VkXcbSurfaceCreateInfoKHR xcb_createInfo{VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR};
+
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateXcbSurfaceKHR(inst, &xcb_createInfo, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+
+    env.vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+}
+
+// Some drivers supporting vkCreateXcbSurfaceKHR, and at least one that doesn't
+TEST(WsiTests, CreateSurfaceXCBMixedICDSupport) {
+    FrameworkEnvironment env{};
+    for (uint32_t icd = 0; icd < 3; ++icd) {
+        Extension first_ext{VK_KHR_SURFACE_EXTENSION_NAME};
+        Extension second_ext{VK_KHR_XCB_SURFACE_EXTENSION_NAME};
+        env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+        auto& cur_icd = env.get_test_icd(icd);
+        cur_icd.icd_api_version = VK_API_VERSION_1_0;
+        cur_icd.add_instance_extensions({first_ext, second_ext});
+        if (icd < 2) {
+            // Only enable ICD for first two
+            cur_icd.enable_icd_wsi = true;
+        }
+    }
+
+    InstWrapper instance(env.vulkan_functions);
+    instance.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    instance.CheckCreate();
+
+    VkXcbSurfaceCreateInfoKHR xcb_createInfo{VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR};
+
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateXcbSurfaceKHR(instance.inst, &xcb_createInfo, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+
+    env.vulkan_functions.vkDestroySurfaceKHR(instance.inst, surface, nullptr);
+}
+
+TEST(WsiTests, GetPhysicalDeviceXcbPresentNoICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    cur_icd.physical_devices.emplace_back("physical_device_0");
+    cur_icd.enable_icd_wsi = false;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions(
+        {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    uint32_t driver_count = 1;
+    VkPhysicalDevice physical_device;
+    ASSERT_EQ(VK_SUCCESS, inst->vkEnumeratePhysicalDevices(inst, &driver_count, &physical_device));
+    ASSERT_EQ(driver_count, 1U);
+
+    DebugUtilsWrapper log{inst};
+    CreateDebugUtilsMessenger(log);
+    auto res = env.vulkan_functions.vkGetPhysicalDeviceXcbPresentationSupportKHR(physical_device, 0, nullptr, 0);
+    ASSERT_EQ(res, VK_FALSE);
+    ASSERT_TRUE(log.find("ICD for selected physical device does not export vkGetPhysicalDeviceXcbPresentationSupportKHR!"));
+}
+
+TEST(WsiTests, GetPhysicalDeviceXcbPresentICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    cur_icd.physical_devices.emplace_back("physical_device_0");
+    cur_icd.enable_icd_wsi = true;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    uint32_t driver_count = 1;
+    VkPhysicalDevice physical_device;
+    ASSERT_EQ(VK_SUCCESS, inst->vkEnumeratePhysicalDevices(inst, &driver_count, &physical_device));
+    ASSERT_EQ(driver_count, 1U);
+
+    ASSERT_EQ(VK_TRUE, env.vulkan_functions.vkGetPhysicalDeviceXcbPresentationSupportKHR(physical_device, 0, nullptr, 0));
+}
+
+TEST(WsiTests, XcbGetPhysicalDeviceSurfaceSupportKHR) {
+    FrameworkEnvironment env{};
+    const uint32_t max_device_count = 4;
+    for (uint32_t icd = 0; icd < max_device_count; ++icd) {
+        Extension first_ext{VK_KHR_SURFACE_EXTENSION_NAME};
+        Extension second_ext{VK_KHR_XCB_SURFACE_EXTENSION_NAME};
+        env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+        auto& cur_icd = env.get_test_icd(icd);
+        cur_icd.icd_api_version = VK_API_VERSION_1_0;
+        cur_icd.set_min_icd_interface_version(5);
+        cur_icd.add_instance_extensions({first_ext, second_ext});
+        std::string dev_name = "phys_dev_" + std::to_string(icd);
+        cur_icd.physical_devices.emplace_back(dev_name.c_str());
+        cur_icd.physical_devices.back().add_queue_family_properties({{VK_QUEUE_GRAPHICS_BIT, 1, 0, {1, 1, 1}}, true});
+        cur_icd.enable_icd_wsi = true;
+    }
+
+    InstWrapper instance(env.vulkan_functions);
+    instance.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME});
+    instance.CheckCreate();
+
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    VkXcbSurfaceCreateInfoKHR xcb_createInfo{VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateXcbSurfaceKHR(instance.inst, &xcb_createInfo, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+    //    ASSERT_EQ(cur_icd.is_using_icd_wsi, UsingICDProvidedWSI::not_using);
+
+    uint32_t device_count = max_device_count;
+    std::array<VkPhysicalDevice, max_device_count> phys_devs;
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkEnumeratePhysicalDevices(instance.inst, &device_count, phys_devs.data()));
+    ASSERT_EQ(device_count, max_device_count);
+
+    for (uint32_t pd = 0; pd < max_device_count; ++pd) {
+        VkBool32 supported = VK_FALSE;
+        ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkGetPhysicalDeviceSurfaceSupportKHR(phys_devs[pd], 0, surface, &supported));
+    }
+
+    env.vulkan_functions.vkDestroySurfaceKHR(instance.inst, surface, nullptr);
 }
 #endif
 
 #if defined(VK_USE_PLATFORM_XLIB_KHR)
-TEST_F(RegressionTests, CreateSurfaceXLIB) {
-    auto& driver = env->get_test_icd();
-    driver.SetICDAPIVersion(VK_MAKE_VERSION(1, 0, 0));
-    driver.SetMinICDInterfaceVersion(5);
-    driver.AddInstanceExtension(Extension(VK_KHR_SURFACE_EXTENSION_NAME));
-    driver.AddInstanceExtension(Extension(VK_KHR_XLIB_SURFACE_EXTENSION_NAME));
-    driver.enable_icd_wsi = true;
+// When ICD doesn't support the extension, create instance should fail
+TEST(WsiTests, CreateSurfaceXLIBNoICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.enable_icd_wsi = false;
 
-    InstWrapper inst{env->vulkan_functions};
-    auto inst_create_info = driver.GetVkInstanceCreateInfo();
-    ASSERT_EQ(CreateInst(inst, inst_create_info), VK_SUCCESS);
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate(VK_ERROR_EXTENSION_NOT_PRESENT);
 
-    Display* xlib_display;
-    Window xlib_window;
+    InstWrapper inst2{env.vulkan_functions};
+    inst2.CheckCreate();
 
-    long visualMask = VisualScreenMask;
-    int numberOfVisuals;
+    ASSERT_EQ(nullptr, env.vulkan_functions.vkGetInstanceProcAddr(inst2.inst, "vkCreateXlibSurfaceKHR"));
+}
 
-    xlib_display = XOpenDisplay(nullptr);
-    ASSERT_NE(xlib_display, nullptr);
+// When ICD doesn't support the surface creation, the loader should handle it
+TEST(WsiTests, CreateSurfaceXLIBNoICDCreateSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    cur_icd.enable_icd_wsi = false;
 
-    XVisualInfo vInfoTemplate = {};
-    vInfoTemplate.screen = DefaultScreen(xlib_display);
-    XVisualInfo* visualInfo = XGetVisualInfo(xlib_display, visualMask, &vInfoTemplate, &numberOfVisuals);
-    xlib_window = XCreateWindow(xlib_display, RootWindow(xlib_display, vInfoTemplate.screen), 0, 0, width, height, 0,
-                                visualInfo->depth, InputOutput, visualInfo->visual, 0, nullptr);
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
 
-    XSync(xlib_display, false);
-    XFree(visualInfo);
-
-    VkXlibSurfaceCreateInfoKHR createInfo;
-    createInfo.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
-    createInfo.pNext = nullptr;
-    createInfo.flags = 0;
-    createInfo.dpy = xlib_display;
-    createInfo.window = xlib_window;
+    VkXlibSurfaceCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR};
 
     VkSurfaceKHR surface;
-    ASSERT_EQ(VK_SUCCESS, env->vulkan_functions.vkCreateXlibSurfaceKHR(inst, &createInfo, nullptr, &surface));
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateXlibSurfaceKHR(inst, &createInfo, nullptr, &surface));
     ASSERT_TRUE(surface != VK_NULL_HANDLE);
 
-    env->vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+    env.vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+}
 
-    XDestroyWindow(xlib_display, xlib_window);
-    XCloseDisplay(xlib_display);
+// When ICD does support the surface creation, the loader should  delegat handle it to the ICD
+TEST(WsiTests, CreateSurfaceXLIBICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    cur_icd.enable_icd_wsi = true;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    VkXlibSurfaceCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR};
+
+    VkSurfaceKHR surface;
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateXlibSurfaceKHR(inst, &createInfo, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+
+    env.vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+}
+
+// Some drivers supporting vkCreateXlibSurfaceKHR, and at least one that doesn't
+TEST(WsiTests, CreateSurfaceXLIBMixedICDSupport) {
+    FrameworkEnvironment env{};
+    for (uint32_t icd = 0; icd < 3; ++icd) {
+        Extension first_ext{VK_KHR_SURFACE_EXTENSION_NAME};
+        Extension second_ext{VK_KHR_XLIB_SURFACE_EXTENSION_NAME};
+        env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+        auto& cur_icd = env.get_test_icd(icd);
+        cur_icd.icd_api_version = VK_API_VERSION_1_0;
+        cur_icd.add_instance_extensions({first_ext, second_ext});
+        if (icd < 2) {
+            // Only enable ICD for first two
+            cur_icd.enable_icd_wsi = true;
+        }
+    }
+
+    InstWrapper instance(env.vulkan_functions);
+    instance.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    instance.CheckCreate();
+
+    VkXlibSurfaceCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR};
+
+    VkSurfaceKHR surface;
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateXlibSurfaceKHR(instance.inst, &createInfo, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+
+    env.vulkan_functions.vkDestroySurfaceKHR(instance.inst, surface, nullptr);
+}
+
+TEST(WsiTests, GetPhysicalDeviceXlibPresentNoICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    cur_icd.physical_devices.emplace_back("physical_device_0");
+    cur_icd.enable_icd_wsi = false;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions(
+        {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XLIB_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    uint32_t driver_count = 1;
+    VkPhysicalDevice physical_device;
+    ASSERT_EQ(VK_SUCCESS, inst->vkEnumeratePhysicalDevices(inst, &driver_count, &physical_device));
+    ASSERT_EQ(driver_count, 1U);
+
+    DebugUtilsWrapper log{inst};
+    CreateDebugUtilsMessenger(log);
+    auto res = env.vulkan_functions.vkGetPhysicalDeviceXlibPresentationSupportKHR(physical_device, 0, nullptr, 0);
+    ASSERT_EQ(res, VK_FALSE);
+    ASSERT_TRUE(log.find("ICD for selected physical device does not export vkGetPhysicalDeviceXlibPresentationSupportKHR!"));
+}
+
+TEST(WsiTests, GetPhysicalDeviceXlibPresentICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    cur_icd.physical_devices.emplace_back("physical_device_0");
+    cur_icd.enable_icd_wsi = true;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    uint32_t driver_count = 1;
+    VkPhysicalDevice physical_device;
+    ASSERT_EQ(VK_SUCCESS, inst->vkEnumeratePhysicalDevices(inst, &driver_count, &physical_device));
+    ASSERT_EQ(driver_count, 1U);
+
+    ASSERT_EQ(VK_TRUE, env.vulkan_functions.vkGetPhysicalDeviceXlibPresentationSupportKHR(physical_device, 0, nullptr, 0));
+}
+
+TEST(WsiTests, XlibGetPhysicalDeviceSurfaceSupportKHR) {
+    FrameworkEnvironment env{};
+    const uint32_t max_device_count = 4;
+    for (uint32_t icd = 0; icd < max_device_count; ++icd) {
+        Extension first_ext{VK_KHR_SURFACE_EXTENSION_NAME};
+        Extension second_ext{VK_KHR_XLIB_SURFACE_EXTENSION_NAME};
+        env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+        auto& cur_icd = env.get_test_icd(icd);
+        cur_icd.icd_api_version = VK_API_VERSION_1_0;
+        cur_icd.set_min_icd_interface_version(5);
+        cur_icd.add_instance_extensions({first_ext, second_ext});
+        std::string dev_name = "phys_dev_" + std::to_string(icd);
+        cur_icd.physical_devices.emplace_back(dev_name.c_str());
+        cur_icd.physical_devices.back().add_queue_family_properties({{VK_QUEUE_GRAPHICS_BIT, 1, 0, {1, 1, 1}}, true});
+        cur_icd.enable_icd_wsi = true;
+    }
+
+    InstWrapper instance(env.vulkan_functions);
+    instance.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XLIB_SURFACE_EXTENSION_NAME});
+    instance.CheckCreate();
+
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    VkXlibSurfaceCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateXlibSurfaceKHR(instance.inst, &createInfo, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+    //    ASSERT_EQ(driver.is_using_icd_wsi, UsingICDProvidedWSI::not_using);
+
+    uint32_t device_count = max_device_count;
+    std::array<VkPhysicalDevice, max_device_count> phys_devs;
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkEnumeratePhysicalDevices(instance.inst, &device_count, phys_devs.data()));
+    ASSERT_EQ(device_count, max_device_count);
+
+    for (uint32_t pd = 0; pd < max_device_count; ++pd) {
+        VkBool32 supported = VK_FALSE;
+        ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkGetPhysicalDeviceSurfaceSupportKHR(phys_devs[pd], 0, surface, &supported));
+    }
+
+    env.vulkan_functions.vkDestroySurfaceKHR(instance.inst, surface, nullptr);
 }
 #endif
 
 #if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+// When ICD doesn't support the extension, create instance should fail
+TEST(WsiTests, CreateSurfaceWaylandNoICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.enable_icd_wsi = false;
 
-struct WaylandState {
-    wl_display* display{};
-    wl_registry* registry{};
-    wl_compositor* compositor{};
-    wl_surface* surface{};
-};
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate(VK_ERROR_EXTENSION_NOT_PRESENT);
 
-static void wayland_registry_global(void* data, struct wl_registry* registry, uint32_t id, const char* interface,
-                                    uint32_t version) {
-    WaylandState* wayland = static_cast<WaylandState*>(data);
-    if (string_eq(interface, "wl_compositor")) {
-        wayland->compositor = (struct wl_compositor*)wl_registry_bind(registry, id, &wl_compositor_interface, 1);
-        wayland->surface = wl_compositor_create_surface(wayland->compositor);
-    }
+    InstWrapper inst2{env.vulkan_functions};
+    inst2.CheckCreate();
+
+    ASSERT_EQ(nullptr, env.vulkan_functions.vkGetInstanceProcAddr(inst2.inst, "vkCreateWaylandSurfaceKHR"));
 }
-static void wayland_registry_global_remove(void* data, struct wl_registry* registry, uint32_t id) {}
-static const struct wl_registry_listener wayland_registry_listener = {wayland_registry_global, wayland_registry_global_remove};
 
-TEST_F(RegressionTests, CreateSurfaceWayland) {
-    auto& driver = env->get_test_icd();
-    driver.SetICDAPIVersion(VK_MAKE_VERSION(1, 0, 0));
-    driver.SetMinICDInterfaceVersion(5);
-    driver.AddInstanceExtension(Extension(VK_KHR_SURFACE_EXTENSION_NAME));
-    driver.AddInstanceExtension(Extension(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME));
-    driver.enable_icd_wsi = true;
+// When ICD doesn't support the surface creation, the loader should handle it
+TEST(WsiTests, CreateSurfaceWaylandNoICDCreateSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    cur_icd.enable_icd_wsi = false;
 
-    InstWrapper inst{env->vulkan_functions};
-    auto inst_create_info = driver.GetVkInstanceCreateInfo();
-    ASSERT_EQ(CreateInst(inst, inst_create_info), VK_SUCCESS);
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
 
-    WaylandState wayland;
-
-    wayland.display = wl_display_connect(nullptr);
-    ASSERT_NE(wayland.display, nullptr);
-    wayland.registry = wl_display_get_registry(wayland.display);
-    wl_registry_add_listener(wl_display_get_registry(wayland.display), &wayland_registry_listener, static_cast<void*>(&wayland));
-    wl_display_roundtrip(wayland.display);
-    wl_registry_destroy(wayland.registry);
-
-    VkWaylandSurfaceCreateInfoKHR createInfo;
-    createInfo.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
-    createInfo.pNext = nullptr;
-    createInfo.flags = 0;
-    createInfo.display = wayland.display;
-    createInfo.surface = wayland.surface;
+    VkWaylandSurfaceCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR};
 
     VkSurfaceKHR surface;
-    ASSERT_EQ(VK_SUCCESS, env->vulkan_functions.vkCreateWaylandSurfaceKHR(inst, &createInfo, nullptr, &surface));
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateWaylandSurfaceKHR(inst, &createInfo, nullptr, &surface));
     ASSERT_TRUE(surface != VK_NULL_HANDLE);
 
-    env->vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+    env.vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+}
 
-    wl_display_disconnect(wayland.display);
+// When ICD does support the surface creation, the loader should  delegat handle it to the ICD
+TEST(WsiTests, CreateSurfaceWaylandICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    cur_icd.enable_icd_wsi = true;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    VkWaylandSurfaceCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR};
+
+    VkSurfaceKHR surface;
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateWaylandSurfaceKHR(inst, &createInfo, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+
+    env.vulkan_functions.vkDestroySurfaceKHR(inst, surface, nullptr);
+}
+
+// Some drivers supporting vkCreateWaylandSurfaceKHR, and at least one that doesn't
+TEST(WsiTests, CreateSurfaceWaylandMixedICDSupport) {
+    FrameworkEnvironment env{};
+    for (uint32_t icd = 0; icd < 3; ++icd) {
+        Extension first_ext{VK_KHR_SURFACE_EXTENSION_NAME};
+        Extension second_ext{VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME};
+        env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+        auto& cur_icd = env.get_test_icd(icd);
+        cur_icd.icd_api_version = VK_API_VERSION_1_0;
+        cur_icd.add_instance_extensions({first_ext, second_ext});
+        if (icd < 2) {
+            // Only enable ICD for first two
+            cur_icd.enable_icd_wsi = true;
+        }
+    }
+
+    InstWrapper instance(env.vulkan_functions);
+    instance.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    instance.CheckCreate();
+
+    VkWaylandSurfaceCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR};
+
+    VkSurfaceKHR surface;
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateWaylandSurfaceKHR(instance.inst, &createInfo, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+
+    env.vulkan_functions.vkDestroySurfaceKHR(instance.inst, surface, nullptr);
+}
+
+TEST(WsiTests, GetPhysicalDeviceWaylandPresentNoICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    cur_icd.physical_devices.emplace_back("physical_device_0");
+    cur_icd.enable_icd_wsi = false;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions(
+        {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    uint32_t driver_count = 1;
+    VkPhysicalDevice physical_device;
+    ASSERT_EQ(VK_SUCCESS, inst->vkEnumeratePhysicalDevices(inst, &driver_count, &physical_device));
+    ASSERT_EQ(driver_count, 1U);
+
+    DebugUtilsWrapper log{inst};
+    CreateDebugUtilsMessenger(log);
+    auto res = env.vulkan_functions.vkGetPhysicalDeviceWaylandPresentationSupportKHR(physical_device, 0, nullptr);
+    ASSERT_EQ(res, VK_FALSE);
+    ASSERT_TRUE(log.find("ICD for selected physical device does not export vkGetPhysicalDeviceWaylandPresentationSupportKHR!"));
+}
+
+TEST(WsiTests, GetPhysicalDeviceWaylandPresentICDSupport) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& cur_icd = env.get_test_icd(0);
+    cur_icd.set_min_icd_interface_version(5);
+    cur_icd.set_icd_api_version(VK_API_VERSION_1_0);
+    cur_icd.add_instance_extension({VK_KHR_SURFACE_EXTENSION_NAME});
+    cur_icd.add_instance_extension({VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    cur_icd.physical_devices.emplace_back("physical_device_0");
+    cur_icd.enable_icd_wsi = true;
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    inst.CheckCreate();
+
+    uint32_t driver_count = 1;
+    VkPhysicalDevice physical_device;
+    ASSERT_EQ(VK_SUCCESS, inst->vkEnumeratePhysicalDevices(inst, &driver_count, &physical_device));
+    ASSERT_EQ(driver_count, 1U);
+
+    ASSERT_EQ(VK_TRUE, env.vulkan_functions.vkGetPhysicalDeviceWaylandPresentationSupportKHR(physical_device, 0, nullptr));
+}
+
+TEST(WsiTests, WaylandGetPhysicalDeviceSurfaceSupportKHR) {
+    FrameworkEnvironment env{};
+    const uint32_t max_device_count = 4;
+    for (uint32_t icd = 0; icd < max_device_count; ++icd) {
+        Extension first_ext{VK_KHR_SURFACE_EXTENSION_NAME};
+        Extension second_ext{VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME};
+        env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+        auto& cur_icd = env.get_test_icd(icd);
+        cur_icd.icd_api_version = VK_API_VERSION_1_0;
+        cur_icd.set_min_icd_interface_version(5);
+        cur_icd.add_instance_extensions({first_ext, second_ext});
+        std::string dev_name = "phys_dev_" + std::to_string(icd);
+        cur_icd.physical_devices.emplace_back(dev_name.c_str());
+        cur_icd.physical_devices.back().add_queue_family_properties({{VK_QUEUE_GRAPHICS_BIT, 1, 0, {1, 1, 1}}, true});
+        cur_icd.enable_icd_wsi = true;
+    }
+
+    InstWrapper instance(env.vulkan_functions);
+    instance.create_info.add_extensions({VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME});
+    instance.CheckCreate();
+
+    VkSurfaceKHR surface{VK_NULL_HANDLE};
+    VkWaylandSurfaceCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR};
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkCreateWaylandSurfaceKHR(instance.inst, &createInfo, nullptr, &surface));
+    ASSERT_TRUE(surface != VK_NULL_HANDLE);
+    //    ASSERT_EQ(cur_icd.is_using_icd_wsi, UsingICDProvidedWSI::not_using);
+
+    uint32_t device_count = max_device_count;
+    std::array<VkPhysicalDevice, max_device_count> phys_devs;
+    ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkEnumeratePhysicalDevices(instance.inst, &device_count, phys_devs.data()));
+    ASSERT_EQ(device_count, max_device_count);
+
+    for (uint32_t pd = 0; pd < max_device_count; ++pd) {
+        VkBool32 supported = VK_FALSE;
+        ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkGetPhysicalDeviceSurfaceSupportKHR(phys_devs[pd], 0, surface, &supported));
+    }
+
+    env.vulkan_functions.vkDestroySurfaceKHR(instance.inst, surface, nullptr);
 }
 #endif
+
+TEST(WsiTests, ForgetEnableSurfaceExtensions) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& driver = env.get_test_icd();
+    setup_WSI_in_ICD(driver);
+    MockQueueFamilyProperties family_props{{VK_QUEUE_GRAPHICS_BIT, 1, 0, {1, 1, 1}}, true};
+
+    driver.physical_devices.emplace_back("physical_device_0");
+    driver.physical_devices.back().queue_family_properties.push_back(family_props);
+    driver.physical_devices.back().add_extension("VK_KHR_swapchain");
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.add_extension("VK_KHR_surface");
+    ASSERT_NO_FATAL_FAILURE(inst.CheckCreate());
+
+    VkSurfaceKHR surface{};
+    ASSERT_FALSE(create_surface(inst, surface));
+}
+
+TEST(WsiTests, SwapchainFunctional) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    auto& driver = env.get_test_icd();
+    setup_WSI_in_ICD(driver);
+    MockQueueFamilyProperties family_props{{VK_QUEUE_GRAPHICS_BIT, 1, 0, {1, 1, 1}}, true};
+
+    driver.physical_devices.emplace_back("physical_device_0");
+    driver.physical_devices.back().queue_family_properties.push_back(family_props);
+    driver.physical_devices.back().add_extension("VK_KHR_swapchain");
+
+    InstWrapper inst{env.vulkan_functions};
+    setup_WSI_in_create_instance(inst);
+    inst.CheckCreate();
+    VkSurfaceKHR surface{};
+    create_surface(inst, surface);
+    VkPhysicalDevice phys_dev = inst.GetPhysDev();
+
+    {  // Use GDPA to get functions
+        DeviceWrapper dev{inst};
+        dev.create_info.add_extension("VK_KHR_swapchain");
+        dev.create_info.add_device_queue(DeviceQueueCreateInfo{}.add_priority(0.0f));
+
+        ASSERT_NO_FATAL_FAILURE(dev.CheckCreate(phys_dev));
+
+        VkSwapchainKHR swapchain{};
+        VkSwapchainCreateInfoKHR swap_create_info{};
+        swap_create_info.surface = surface;
+        DeviceFunctions funcs{*inst.functions, dev};
+        ASSERT_EQ(VK_SUCCESS, funcs.vkCreateSwapchainKHR(dev, &swap_create_info, nullptr, &swapchain));
+        uint32_t count = 0;
+        ASSERT_EQ(VK_SUCCESS, funcs.vkGetSwapchainImagesKHR(dev, swapchain, &count, nullptr));
+        ASSERT_GT(count, 0U);
+        std::array<VkImage, 16> images;
+        ASSERT_EQ(VK_SUCCESS, funcs.vkGetSwapchainImagesKHR(dev, swapchain, &count, images.data()));
+        funcs.vkDestroySwapchainKHR(dev, swapchain, nullptr);
+    }
+    {  // Use GIPA gotten functions
+        DeviceWrapper dev{inst};
+        dev.create_info.add_extension("VK_KHR_swapchain");
+        dev.create_info.add_device_queue(DeviceQueueCreateInfo{}.add_priority(0.0f));
+
+        ASSERT_NO_FATAL_FAILURE(dev.CheckCreate(phys_dev));
+
+        PFN_vkCreateSwapchainKHR inst_CreateSwapchainKHR = inst.load("vkCreateSwapchainKHR");
+        PFN_vkGetSwapchainImagesKHR inst_GetSwapchainImagesKHR = inst.load("vkGetSwapchainImagesKHR");
+        PFN_vkDestroySwapchainKHR inst_DestroySwapchainKHR = inst.load("vkDestroySwapchainKHR");
+        ASSERT_TRUE(nullptr != inst_CreateSwapchainKHR);
+        ASSERT_TRUE(nullptr != inst_GetSwapchainImagesKHR);
+        ASSERT_TRUE(nullptr != inst_DestroySwapchainKHR);
+
+        VkSwapchainKHR swapchain{};
+        VkSwapchainCreateInfoKHR swap_create_info{};
+        swap_create_info.surface = surface;
+
+        ASSERT_EQ(VK_SUCCESS, inst_CreateSwapchainKHR(dev, &swap_create_info, nullptr, &swapchain));
+        uint32_t count = 0;
+        ASSERT_EQ(VK_SUCCESS, inst_GetSwapchainImagesKHR(dev, swapchain, &count, nullptr));
+        ASSERT_GT(count, 0U);
+        std::array<VkImage, 16> images;
+        ASSERT_EQ(VK_SUCCESS, inst_GetSwapchainImagesKHR(dev, swapchain, &count, images.data()));
+        inst_DestroySwapchainKHR(dev, swapchain, nullptr);
+    }
+    {  // forget to enable the extension
+        DeviceWrapper dev{inst};
+        ASSERT_NO_FATAL_FAILURE(dev.CheckCreate(phys_dev));
+
+        DeviceFunctions funcs{*inst.functions, dev};
+        ASSERT_EQ(funcs.vkCreateSwapchainKHR, nullptr);
+        ASSERT_EQ(funcs.vkGetSwapchainImagesKHR, nullptr);
+        ASSERT_EQ(funcs.vkDestroySwapchainKHR, nullptr);
+    }
+    {  // forget to set the surface
+        DeviceWrapper dev{inst};
+        dev.create_info.add_extension("VK_KHR_swapchain");
+        dev.create_info.add_device_queue(DeviceQueueCreateInfo{}.add_priority(0.0f));
+
+        dev.CheckCreate(phys_dev);
+
+        VkSwapchainKHR swapchain{};
+        VkSwapchainCreateInfoKHR swap_create_info{};
+        DeviceFunctions funcs{*inst.functions, dev};
+        ASSERT_DEATH(funcs.vkCreateSwapchainKHR(dev, &swap_create_info, nullptr, &swapchain), "");
+    }
+    env.vulkan_functions.vkDestroySurfaceKHR(inst.inst, surface, nullptr);
+}
