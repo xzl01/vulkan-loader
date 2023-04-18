@@ -30,14 +30,14 @@
 #include "test_util.h"
 
 struct LayerDefinition {
-    std::string layerName;
-    uint32_t specVersion = VK_MAKE_VERSION(1, 0, 0);
-    uint32_t implementationVersion = VK_MAKE_VERSION(1, 0, 0);
-    std::string description;
-    std::vector<Extension> extensions;
+    BUILDER_VALUE(LayerDefinition, std::string, layerName, {})
+    BUILDER_VALUE(LayerDefinition, uint32_t, specVersion, VK_API_VERSION_1_0)
+    BUILDER_VALUE(LayerDefinition, uint32_t, implementationVersion, VK_API_VERSION_1_0)
+    BUILDER_VALUE(LayerDefinition, std::string, description, {})
+    BUILDER_VECTOR(LayerDefinition, Extension, extensions, extension)
 
-    LayerDefinition(std::string layerName, uint32_t specVersion = VK_MAKE_VERSION(1, 0, 0),
-                    uint32_t implementationVersion = VK_MAKE_VERSION(1, 0, 0), std::string description = "",
+    LayerDefinition(std::string layerName, uint32_t specVersion = VK_API_VERSION_1_0,
+                    uint32_t implementationVersion = VK_API_VERSION_1_0, std::string description = "",
                     std::vector<Extension> extensions = {})
         : layerName(layerName),
           specVersion(specVersion),
@@ -47,10 +47,10 @@ struct LayerDefinition {
 
     VkLayerProperties get() const noexcept {
         VkLayerProperties props{};
-        std::strncpy(props.layerName, layerName.data(), VK_MAX_EXTENSION_NAME_SIZE);
+        copy_string_to_char_array(layerName, &props.layerName[0], VK_MAX_EXTENSION_NAME_SIZE);
         props.specVersion = specVersion;
         props.implementationVersion = implementationVersion;
-        std::strncpy(props.description, layerName.data(), VK_MAX_DESCRIPTION_SIZE);
+        copy_string_to_char_array(description, &props.description[0], VK_MAX_DESCRIPTION_SIZE);
         return props;
     }
 };

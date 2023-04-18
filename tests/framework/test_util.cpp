@@ -45,11 +45,11 @@ void print_error_message(LSTATUS status, const char* function_name, std::string 
     LPVOID lpMsgBuf;
     DWORD dw = GetLastError();
 
-    FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, dw,
-                  MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&lpMsgBuf, 0, NULL);
+    FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, dw,
+                  MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), reinterpret_cast<LPTSTR>(&lpMsgBuf), 0, nullptr);
 
     std::cerr << function_name << " failed with " << win_api_error_str(status) << ": "
-              << std::string(static_cast<LPTSTR>(lpMsgBuf));
+              << std::string(reinterpret_cast<LPTSTR>(lpMsgBuf));
     if (optional_message != "") {
         std::cerr << " | " << optional_message;
     }
@@ -57,52 +57,89 @@ void print_error_message(LSTATUS status, const char* function_name, std::string 
     LocalFree(lpMsgBuf);
 }
 
-bool set_env_var(std::string const& name, std::string const& value) {
-    bool ret = SetEnvironmentVariableA(name.c_str(), value.c_str());
-    if (ret == false) {
-        print_error_message(ERROR_SETENV_FAILED, "SetEnvironmentVariableA");
-        return true;
+void set_env_var(std::string const& name, std::string const& value) {
+    BOOL ret = SetEnvironmentVariableW(widen(name).c_str(), widen(value).c_str());
+    if (ret == 0) {
+        print_error_message(ERROR_SETENV_FAILED, "SetEnvironmentVariableW");
     }
-    return false;
 }
-bool remove_env_var(std::string const& name) { return SetEnvironmentVariableA(name.c_str(), nullptr); }
-#define ENV_VAR_BUFFER_SIZE 4096
-std::string get_env_var(std::string const& name) {
-    std::string value;
-    value.resize(ENV_VAR_BUFFER_SIZE);
-    DWORD ret = GetEnvironmentVariable(name.c_str(), (LPSTR)value.c_str(), ENV_VAR_BUFFER_SIZE);
-    if (0 == ret) {
-        print_error_message(ERROR_ENVVAR_NOT_FOUND, "GetEnvironmentVariable");
-        return std::string();
-    } else if (ENV_VAR_BUFFER_SIZE < ret) {
-        std::cerr << "Not enough space to write environment variable" << name << "\n";
-        return std::string();
-    } else {
-        value.resize(ret);
+void remove_env_var(std::string const& name) { SetEnvironmentVariableW(widen(name).c_str(), nullptr); }
+std::string get_env_var(std::string const& name, bool report_failure) {
+    std::wstring name_utf16 = widen(name);
+    DWORD value_size = GetEnvironmentVariableW(name_utf16.c_str(), nullptr, 0);
+    if (0 == value_size) {
+        if (report_failure) print_error_message(ERROR_ENVVAR_NOT_FOUND, "GetEnvironmentVariableW");
+        return {};
     }
-    return value;
+    std::wstring value(value_size, L'\0');
+    if (GetEnvironmentVariableW(name_utf16.c_str(), &value[0], value_size) != value_size - 1) {
+        return {};
+    }
+    return narrow(value);
 }
-#elif defined(__linux__) || defined(__APPLE__)
+#elif defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 
-bool set_env_var(std::string const& name, std::string const& value) { return setenv(name.c_str(), value.c_str(), 1); }
-bool remove_env_var(std::string const& name) { return unsetenv(name.c_str()); }
-std::string get_env_var(std::string const& name) {
+void set_env_var(std::string const& name, std::string const& value) { setenv(name.c_str(), value.c_str(), 1); }
+void remove_env_var(std::string const& name) { unsetenv(name.c_str()); }
+std::string get_env_var(std::string const& name, bool report_failure) {
     char* ret = getenv(name.c_str());
     if (ret == nullptr) {
-        std::cerr << "Failed to get environment variable:" << name << "\n";
+        if (report_failure) std::cerr << "Failed to get environment variable:" << name << "\n";
         return std::string();
     }
     return ret;
 }
 #endif
 
+template <typename T>
+void print_list_of_t(std::string& out, const char* object_name, std::vector<T> const& vec) {
+    if (vec.size() > 0) {
+        out += std::string(",\n\t\t\"") + object_name + "\": {";
+        for (size_t i = 0; i < vec.size(); i++) {
+            if (i > 0) out += ",\t\t\t";
+            out += "\n\t\t\t" + vec.at(i).get_manifest_str();
+        }
+        out += "\n\t\t}";
+    }
+}
+
+template <typename T>
+void print_vector_of_t(std::string& out, const char* object_name, std::vector<T> const& vec) {
+    if (vec.size() > 0) {
+        out += std::string(",\n\t\t\"") + object_name + "\": [";
+        for (size_t i = 0; i < vec.size(); i++) {
+            if (i > 0) out += ",\t\t\t";
+            out += "\n\t\t\t" + vec.at(i).get_manifest_str();
+        }
+        out += "\n\t\t]";
+    }
+}
+void print_vector_of_strings(std::string& out, const char* object_name, std::vector<std::string> const& strings) {
+    if (strings.size() > 0) {
+        out += std::string(",\n\t\t\"") + object_name + "\": [";
+        for (size_t i = 0; i < strings.size(); i++) {
+            if (i > 0) out += ",\t\t\t";
+            out += "\"" + fs::fixup_backslashes_in_path(strings.at(i)) + "\"";
+        }
+        out += "]";
+    }
+}
+
+std::string to_text(bool b) { return b ? std::string("true") : std::string("false"); }
+
 std::string ManifestICD::get_manifest_str() const {
     std::string out;
     out += "{\n";
     out += "    " + file_format_version.get_version_str() + "\n";
     out += "    \"ICD\": {\n";
-    out += "        \"library_path\": \"" + lib_path + "\",\n";
-    out += "        \"api_version\": \"" + version_to_string(api_version) + "\"\n";
+    out += "        \"library_path\": \"" + fs::fixup_backslashes_in_path(lib_path) + "\",\n";
+    out += "        \"api_version\": \"" + version_to_string(api_version) + "\",\n";
+    out += "        \"is_portability_driver\": " + to_text(is_portability_driver);
+    if (!library_arch.empty()) {
+        out += ",\n       \"library_arch\": \"" + library_arch + "\"\n";
+    } else {
+        out += "\n";
+    }
     out += "    }\n";
     out += "}\n";
     return out;
@@ -111,15 +148,8 @@ std::string ManifestICD::get_manifest_str() const {
 std::string ManifestLayer::LayerDescription::Extension::get_manifest_str() const {
     std::string out;
     out += "{ \"name\":\"" + name + "\",\n\t\t\t\"spec_version\":\"" + std::to_string(spec_version) + "\"";
-    if (entrypoints.size() > 0) {
-        out += ",\n\t\t\t\"entrypoints\": [";
-        for (size_t i = 0; i < entrypoints.size(); i++) {
-            if (i > 0) out += ", ";
-            out += "\"" + entrypoints.at(i) + "\"";
-        }
-        out += "]";
-    }
-    out += "\t\t\t}";
+    print_vector_of_strings(out, "entrypoints", entrypoints);
+    out += "\n\t\t\t}";
     return out;
 }
 
@@ -129,67 +159,37 @@ std::string ManifestLayer::LayerDescription::get_manifest_str() const {
     out += "\t\t\"name\":\"" + name + "\",\n";
     out += "\t\t\"type\":\"" + get_type_str(type) + "\",\n";
     if (lib_path.size() > 0) {
-        out += "\t\t\"library_path\": \"" + lib_path + "\",\n";
+        out += "\t\t\"library_path\": \"" + fs::fixup_backslashes_in_path(lib_path.str()) + "\",\n";
     }
     out += "\t\t\"api_version\": \"" + version_to_string(api_version) + "\",\n";
     out += "\t\t\"implementation_version\":\"" + std::to_string(implementation_version) + "\",\n";
     out += "\t\t\"description\": \"" + description + "\"";
-    if (functions.size() > 0) {
-        out += ",\n\t\t\"functions\": {";
-        for (size_t i = 0; i < functions.size(); i++) {
-            if (i > 0) out += ",";
-            out += "\n\t\t\t" + functions.at(i).get_manifest_str();
-        }
-        out += "\n\t\t}";
+    print_list_of_t(out, "functions", functions);
+    print_vector_of_t(out, "instance_extensions", instance_extensions);
+    print_vector_of_t(out, "device_extensions", device_extensions);
+    if (!enable_environment.empty()) {
+        out += ",\n\t\t\"enable_environment\": { \"" + enable_environment + "\": \"1\" }";
     }
-    if (instance_extensions.size() > 0) {
-        out += ",\n\t\t\"instance_extensions\": [";
-        for (size_t i = 0; i < instance_extensions.size(); i++) {
-            if (i > 0) out += ",";
-            out += "\n\t\t\t" + instance_extensions.at(i).get_manifest_str();
-        }
-        out += "\n\t\t]";
+    if (!disable_environment.empty()) {
+        out += ",\n\t\t\"disable_environment\": { \"" + disable_environment + "\": \"1\" }";
     }
-    if (device_extensions.size() > 0) {
-        out += ",\n\t\t\"device_extensions\": [";
-        for (size_t i = 0; i < device_extensions.size(); i++) {
-            if (i > 0) out += ",";
-            out += "\n\t\t\t" + device_extensions.at(i).get_manifest_str();
-        }
-        out += "\n\t\t]";
-    }
-    if (enable_environment.size() > 0) {
-        out += ",\n\t\t\"enable_environment\": { \"" + enable_environment + "\": \"1\"";
-        out += "\n\t\t}";
-    }
-    if (disable_environment.size() > 0) {
-        out += ",\n\t\t\"disable_environment\": { \"" + disable_environment + "\": \"1\"";
-        out += "\n\t\t}";
-    }
-    if (component_layers.size() > 0) {
-        out += ",\n\t\t\"component_layers\": [";
-        for (size_t i = 0; i < component_layers.size(); i++) {
-            if (i > 0) out += ", ";
-            out += "\"" + component_layers.at(i) + "\"";
-        }
-        out += "]\n\t\t}";
-    }
-    if (pre_instance_functions.size() > 0) {
-        out += ",\n\t\t\"pre_instance_functions\": [";
-        for (size_t i = 0; i < pre_instance_functions.size(); i++) {
-            if (i > 0) out += ", ";
-            out += "\"" + pre_instance_functions.at(i) + "\"";
-        }
-        out += "]\n\t\t}";
+    print_vector_of_strings(out, "component_layers", component_layers);
+    print_vector_of_strings(out, "blacklisted_layers", blacklisted_layers);
+    print_vector_of_strings(out, "override_paths", override_paths);
+    print_vector_of_strings(out, "app_keys", app_keys);
+    print_list_of_t(out, "pre_instance_functions", pre_instance_functions);
+    if (!library_arch.empty()) {
+        out += ",\n\t\t\"library_arch\": \"" + library_arch + "\"";
     }
     out += "\n\t}";
+
     return out;
 }
 
 VkLayerProperties ManifestLayer::LayerDescription::get_layer_properties() const {
     VkLayerProperties properties{};
-    strncpy(properties.layerName, name.c_str(), 256);
-    strncpy(properties.description, description.c_str(), 256);
+    copy_string_to_char_array(name, properties.layerName, VK_MAX_EXTENSION_NAME_SIZE);
+    copy_string_to_char_array(description, properties.description, VK_MAX_EXTENSION_NAME_SIZE);
     properties.implementationVersion = implementation_version;
     properties.specVersion = api_version;
     return properties;
@@ -224,7 +224,7 @@ std::string make_native(std::string const& in_path) {
         else
             out += c;
     }
-#elif defined(__linux__) || defined(__APPLE__)
+#elif defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
     for (size_t i = 0; i < in_path.size(); i++) {
         if (i + 1 < in_path.size() && in_path[i] == '\\' && in_path[i + 1] == '\\') {
             out += '/';
@@ -247,6 +247,7 @@ std::string fixup_backslashes_in_path(std::string const& in_path) {
     }
     return out;
 }
+fs::path fixup_backslashes_in_path(fs::path const& in_path) { return fixup_backslashes_in_path(in_path.str()); }
 
 path& path::operator+=(path const& in) {
     contents += in.contents;
@@ -349,24 +350,39 @@ path& path::replace_filename(path const& replacement) {
 // internal implementation helper for per-platform creating & destroying folders
 int create_folder(path const& path) {
 #if defined(WIN32)
-    return _mkdir(path.c_str());
+    return _wmkdir(widen(path.str()).c_str());
 #else
     mkdir(path.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
     return 0;
 #endif
 }
 
-int delete_folder(path const& folder) {
+int delete_folder_contents(path const& folder) {
 #if defined(WIN32)
-    if (INVALID_FILE_ATTRIBUTES == GetFileAttributes(folder.c_str()) && GetLastError() == ERROR_FILE_NOT_FOUND) {
+    std::wstring folder_utf16 = widen(folder.str());
+    if (INVALID_FILE_ATTRIBUTES == GetFileAttributesW(folder_utf16.c_str()) && GetLastError() == ERROR_FILE_NOT_FOUND) {
         // nothing to delete
         return 0;
     }
-    bool ret = RemoveDirectoryA(folder.c_str());
-    if (ret == 0) {
-        print_error_message(ERROR_REMOVEDIRECTORY_FAILED, "RemoveDirectoryA");
+    std::wstring search_path = folder_utf16 + L"/*.*";
+    std::string s_p = folder.str() + "/";
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = ::FindFirstFileW(search_path.c_str(), &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            std::string file_name_utf8 = narrow(fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!string_eq(file_name_utf8.c_str(), ".") && !string_eq(file_name_utf8.c_str(), "..")) {
+                    delete_folder(s_p + file_name_utf8);
+                }
+            } else {
+                std::string child_name = s_p + file_name_utf8;
+                DeleteFileW(widen(child_name).c_str());
+            }
+        } while (::FindNextFileW(hFind, &fd));
+        ::FindClose(hFind);
     }
-    return ret;
+    return 0;
 #else
     DIR* dir = opendir(folder.c_str());
     if (!dir) {
@@ -392,75 +408,85 @@ int delete_folder(path const& folder) {
         ret = ret2;
     }
     closedir(dir);
-
-    if (!ret) ret = rmdir(folder.c_str());
     return ret;
 #endif
 }
 
-FolderManager::FolderManager(path root_path, std::string name, DebugMode debug) : debug(debug), folder(root_path / name) {
+int delete_folder(path const& folder) {
+    int ret = delete_folder_contents(folder);
+    if (ret != 0) return ret;
+#if defined(WIN32)
+    _wrmdir(widen(folder.str()).c_str());
+    return 0;
+#else
+    return rmdir(folder.c_str());
+#endif
+}
+
+#if defined(WIN32)
+std::wstring native_path(const std::string& utf8) { return widen(utf8); }
+#else
+const std::string& native_path(const std::string& utf8) { return utf8; }
+#endif
+
+FolderManager::FolderManager(path root_path, std::string name) noexcept : folder(root_path / name) {
+    delete_folder_contents(folder);
     create_folder(folder);
 }
-FolderManager::~FolderManager() {
-    for (auto& file : files) {
-        if (debug >= DebugMode::log) std::cout << "Removing manifest " << file << " at " << (folder / file).str() << "\n";
-        if (debug != DebugMode::no_delete) {
-            std::remove((folder / file).c_str());
-        }
+FolderManager::~FolderManager() noexcept {
+    if (folder.str().empty()) return;
+    auto list_of_files_to_delete = files;
+    // remove(file) modifies the files variable, copy the list before deleting it
+    // Note: the allocation tests currently leak the loaded driver handles because in an OOM scenario the loader doesn't bother
+    // removing those. Since this is in an OOM situation, it is a low priority to fix. It does have the effect that Windows will
+    // be unable to delete the binaries that were leaked.
+    for (auto& file : list_of_files_to_delete) {
+        remove(file);
     }
-    if (debug != DebugMode::no_delete) {
-        delete_folder(folder);
-    }
-    if (debug >= DebugMode::log) {
-        std::cout << "Deleting folder " << folder.str() << "\n";
-    }
+    delete_folder(folder);
 }
-path FolderManager::write(std::string const& name, ManifestICD const& icd_manifest) {
+FolderManager::FolderManager(FolderManager&& other) noexcept : folder(other.folder), files(other.files) {
+    other.folder.str().clear();
+}
+FolderManager& FolderManager::operator=(FolderManager&& other) noexcept {
+    folder = other.folder;
+    files = other.files;
+    other.folder.str().clear();
+    return *this;
+}
+
+path FolderManager::write_manifest(std::string const& name, std::string const& contents) {
     path out_path = folder / name;
     auto found = std::find(files.begin(), files.end(), name);
     if (found != files.end()) {
-        if (debug >= DebugMode::log) std::cout << "Writing icd manifest to " << name << "\n";
+        std::cout << "Overwriting manifest " << name << ". Was this intended?\n";
     } else {
-        if (debug >= DebugMode::log) std::cout << "Creating icd manifest " << name << " at " << out_path.str() << "\n";
         files.emplace_back(name);
     }
-    auto file = std::ofstream(out_path.str(), std::ios_base::trunc | std::ios_base::out);
+    auto file = std::ofstream(native_path(out_path.str()), std::ios_base::trunc | std::ios_base::out);
     if (!file) {
-        std::cerr << "Failed to create icd manifest " << name << " at " << out_path.str() << "\n";
+        std::cerr << "Failed to create manifest " << name << " at " << out_path.str() << "\n";
         return out_path;
     }
-    file << icd_manifest.get_manifest_str() << std::endl;
+    file << contents << std::endl;
     return out_path;
 }
-path FolderManager::write(std::string const& name, ManifestLayer const& layer_manifest) {
-    path out_path = folder / name;
-    auto found = std::find(files.begin(), files.end(), name);
-    if (found != files.end()) {
-        if (debug >= DebugMode::log) std::cout << "Writing layer manifest to " << name << "\n";
-    } else {
-        if (debug >= DebugMode::log) std::cout << "Creating layer manifest " << name << " at " << out_path.str() << "\n";
-        files.emplace_back(name);
-    }
-    auto file = std::ofstream(out_path.str(), std::ios_base::trunc | std::ios_base::out);
-    file << layer_manifest.get_manifest_str() << std::endl;
-    if (!file) {
-        std::cerr << "Failed to create icd manifest " << name << " at " << out_path.str() << "\n";
-        return out_path;
-    }
-    return out_path;
-}
+void FolderManager::add_existing_file(std::string const& file_name) { files.emplace_back(file_name); }
+
 // close file handle, delete file, remove `name` from managed file list.
 void FolderManager::remove(std::string const& name) {
     path out_path = folder / name;
     auto found = std::find(files.begin(), files.end(), name);
     if (found != files.end()) {
-        if (debug >= DebugMode::log) std::cout << "Removing manifest " << name << " at " << out_path.str() << "\n";
-        if (debug != DebugMode::no_delete) {
-            std::remove(out_path.c_str());
-            files.erase(found);
+        int rc = std::remove(out_path.c_str());
+        if (rc != 0) {
+            std::cerr << "Failed to remove file " << name << " at " << out_path.str() << "\n";
         }
+
+        files.erase(found);
+
     } else {
-        if (debug >= DebugMode::log) std::cout << "Couldn't remove manifest " << name << " at " << out_path.str() << ".\n";
+        std::cout << "Couldn't remove file " << name << " at " << out_path.str() << ".\n";
     }
 }
 
@@ -469,19 +495,20 @@ path FolderManager::copy_file(path const& file, std::string const& new_name) {
     auto new_filepath = folder / new_name;
     auto found = std::find(files.begin(), files.end(), new_name);
     if (found != files.end()) {
-        if (debug >= DebugMode::log) std::cout << "File location already contains" << new_name << ". Is this a bug?\n";
+        std::cout << "File location already contains" << new_name << ". Is this a bug?\n";
+    } else if (file.str() == new_filepath.str()) {
+        std::cout << "Trying to copy " << new_name << " into itself. Is this a bug?\n";
     } else {
-        if (debug >= DebugMode::log) std::cout << "Copying file" << file.str() << " to " << new_filepath.str() << "\n";
         files.emplace_back(new_name);
     }
-    std::ifstream src(file.str(), std::ios::binary);
+    std::ifstream src(native_path(file.str()), std::ios::binary);
     if (!src) {
         std::cerr << "Failed to create file " << file.str() << " for copying from\n";
         return new_filepath;
     }
-    std::ofstream dst(new_filepath.str(), std::ios::binary);
+    std::ofstream dst(native_path(new_filepath.str()), std::ios::binary);
     if (!dst) {
-        std::cerr << "Failed to create file " << file.str() << " for copying to\n";
+        std::cerr << "Failed to create file " << new_filepath.str() << " for copying to\n";
         return new_filepath;
     }
     dst << src.rdbuf();
@@ -489,176 +516,109 @@ path FolderManager::copy_file(path const& file, std::string const& new_name) {
 }
 }  // namespace fs
 
-bool string_eq(const char* a, const char* b) noexcept { return strcmp(a, b) == 0; }
-bool string_eq(const char* a, const char* b, size_t len) noexcept { return strncmp(a, b, len) == 0; }
-
-VulkanFunctions::VulkanFunctions() : loader(FRAMEWORK_VULKAN_LIBRARY_PATH) {
-    // clang-format off
-    vkGetInstanceProcAddr = loader.get_symbol<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
-    vkEnumerateInstanceExtensionProperties = loader.get_symbol<PFN_vkEnumerateInstanceExtensionProperties>("vkEnumerateInstanceExtensionProperties");
-    vkEnumerateInstanceLayerProperties = loader.get_symbol<PFN_vkEnumerateInstanceLayerProperties>("vkEnumerateInstanceLayerProperties");
-    vkEnumerateInstanceVersion = loader.get_symbol<PFN_vkEnumerateInstanceVersion>("vkEnumerateInstanceVersion");
-    vkCreateInstance = loader.get_symbol<PFN_vkCreateInstance>("vkCreateInstance");
-    vkDestroyInstance = loader.get_symbol<PFN_vkDestroyInstance>("vkDestroyInstance");
-    vkEnumeratePhysicalDevices = loader.get_symbol<PFN_vkEnumeratePhysicalDevices>("vkEnumeratePhysicalDevices");
-    vkGetPhysicalDeviceFeatures = loader.get_symbol<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures");
-    vkGetPhysicalDeviceFeatures2 = loader.get_symbol<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2");
-    vkGetPhysicalDeviceFormatProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
-    vkGetPhysicalDeviceImageFormatProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceImageFormatProperties>("vkGetPhysicalDeviceImageFormatProperties");
-    vkGetPhysicalDeviceProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
-    vkGetPhysicalDeviceProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2");
-    vkGetPhysicalDeviceQueueFamilyProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
-    vkGetPhysicalDeviceQueueFamilyProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceQueueFamilyProperties2>("vkGetPhysicalDeviceQueueFamilyProperties2");
-    vkGetPhysicalDeviceMemoryProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties");
-    vkGetPhysicalDeviceFormatProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceFormatProperties2>("vkGetPhysicalDeviceFormatProperties2");
-    vkGetPhysicalDeviceMemoryProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceMemoryProperties2>("vkGetPhysicalDeviceMemoryProperties2");
-    vkGetPhysicalDeviceSurfaceSupportKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceSurfaceSupportKHR>("vkGetPhysicalDeviceSurfaceSupportKHR");
-    vkGetPhysicalDeviceSurfaceFormatsKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>("vkGetPhysicalDeviceSurfaceFormatsKHR");
-    vkGetPhysicalDeviceSurfacePresentModesKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>("vkGetPhysicalDeviceSurfacePresentModesKHR");
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>("vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
-    vkEnumerateDeviceExtensionProperties = loader.get_symbol<PFN_vkEnumerateDeviceExtensionProperties>("vkEnumerateDeviceExtensionProperties");
-    vkEnumerateDeviceLayerProperties = loader.get_symbol<PFN_vkEnumerateDeviceLayerProperties>("vkEnumerateDeviceLayerProperties");
-
-    vkDestroySurfaceKHR = loader.get_symbol<PFN_vkDestroySurfaceKHR>("vkDestroySurfaceKHR");
-    vkGetDeviceProcAddr = loader.get_symbol<PFN_vkGetDeviceProcAddr>("vkGetDeviceProcAddr");
-    vkCreateDevice = loader.get_symbol<PFN_vkCreateDevice>("vkCreateDevice");
-
-#ifdef VK_USE_PLATFORM_ANDROID_KHR
-    vkCreateAndroidSurfaceKHR = loader.get_symbol<PFN_vkCreateAndroidSurfaceKHR>("vkCreateAndroidSurfaceKHR");
-#endif
-#ifdef VK_USE_PLATFORM_METAL_EXT
-    vkCreateMetalSurfaceEXT = loader.get_symbol<PFN_vkCreateMetalSurfaceEXT>("vkCreateMetalSurfaceEXT")
-#endif
-#ifdef VK_USE_PLATFORM_WAYLAND_KHR
-    vkCreateWaylandSurfaceKHR = loader.get_symbol<PFN_vkCreateWaylandSurfaceKHR>("vkCreateWaylandSurfaceKHR");
-#endif
-#ifdef VK_USE_PLATFORM_XCB_KHR
-    vkCreateXcbSurfaceKHR = loader.get_symbol<PFN_vkCreateXcbSurfaceKHR>("vkCreateXcbSurfaceKHR");
-#endif
-#ifdef VK_USE_PLATFORM_XLIB_KHR
-    vkCreateXlibSurfaceKHR = loader.get_symbol<PFN_vkCreateXlibSurfaceKHR>("vkCreateXlibSurfaceKHR");
-#endif
-#ifdef VK_USE_PLATFORM_WIN32_KHR
-    vkCreateWin32SurfaceKHR = loader.get_symbol<PFN_vkCreateWin32SurfaceKHR>("vkCreateWin32SurfaceKHR");
-#endif
-    vkDestroyDevice = loader.get_symbol<PFN_vkDestroyDevice>("vkDestroyDevice");
-    vkGetDeviceQueue = loader.get_symbol<PFN_vkGetDeviceQueue>("vkGetDeviceQueue");
-    // clang-format on
-}
+bool string_eq(const char* a, const char* b) noexcept { return a && b && strcmp(a, b) == 0; }
+bool string_eq(const char* a, const char* b, size_t len) noexcept { return a && b && strncmp(a, b, len) == 0; }
 
 InstanceCreateInfo::InstanceCreateInfo() {
-    inst_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    application_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
 }
 
 VkInstanceCreateInfo* InstanceCreateInfo::get() noexcept {
-    app_info.pApplicationName = app_name.c_str();
-    app_info.pEngineName = engine_name.c_str();
-    app_info.applicationVersion = app_version;
-    app_info.engineVersion = engine_version;
-    app_info.apiVersion = api_version;
-    inst_info.pApplicationInfo = &app_info;
-    inst_info.enabledLayerCount = static_cast<uint32_t>(enabled_layers.size());
-    inst_info.ppEnabledLayerNames = enabled_layers.data();
-    inst_info.enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size());
-    inst_info.ppEnabledExtensionNames = enabled_extensions.data();
-    return &inst_info;
+    if (fill_in_application_info) {
+        application_info.pApplicationName = app_name.c_str();
+        application_info.pEngineName = engine_name.c_str();
+        application_info.applicationVersion = app_version;
+        application_info.engineVersion = engine_version;
+        application_info.apiVersion = api_version;
+        instance_info.pApplicationInfo = &application_info;
+    }
+    instance_info.flags = flags;
+    instance_info.enabledLayerCount = static_cast<uint32_t>(enabled_layers.size());
+    instance_info.ppEnabledLayerNames = enabled_layers.data();
+    instance_info.enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size());
+    instance_info.ppEnabledExtensionNames = enabled_extensions.data();
+    return &instance_info;
 }
-InstanceCreateInfo& InstanceCreateInfo::set_application_name(std::string app_name) {
-    this->app_name = app_name;
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::set_engine_name(std::string engine_name) {
-    this->engine_name = engine_name;
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::set_app_version(uint32_t app_version) {
-    this->app_version = app_version;
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::set_engine_version(uint32_t engine_version) {
-    this->engine_version = engine_version;
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::set_api_version(uint32_t api_version) {
-    this->api_version = api_version;
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::add_layer(const char* layer_name) {
-    enabled_layers.push_back(layer_name);
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::add_extension(const char* ext_name) {
-    enabled_extensions.push_back(ext_name);
+InstanceCreateInfo& InstanceCreateInfo::set_api_version(uint32_t major, uint32_t minor, uint32_t patch) {
+    this->api_version = VK_MAKE_API_VERSION(0, major, minor, patch);
     return *this;
 }
 
-DeviceQueueCreateInfo::DeviceQueueCreateInfo() { queue.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO; }
-DeviceQueueCreateInfo& DeviceQueueCreateInfo::add_priority(float priority) {
-    priorities.push_back(priority);
-    return *this;
+DeviceQueueCreateInfo::DeviceQueueCreateInfo() { queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO; }
+DeviceQueueCreateInfo::DeviceQueueCreateInfo(const VkDeviceQueueCreateInfo* create_info) {
+    queue_create_info = *create_info;
+    for (uint32_t i = 0; i < create_info->queueCount; i++) {
+        priorities.push_back(create_info->pQueuePriorities[i]);
+    }
 }
-DeviceQueueCreateInfo& DeviceQueueCreateInfo::set_props(VkQueueFamilyProperties props) {
-    queue.queueCount = props.queueCount;
-    return *this;
+
+VkDeviceQueueCreateInfo DeviceQueueCreateInfo::get() noexcept {
+    queue_create_info.pQueuePriorities = priorities.data();
+    queue_create_info.queueCount = 1;
+    queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    return queue_create_info;
+}
+
+DeviceCreateInfo::DeviceCreateInfo(const VkDeviceCreateInfo* create_info) {
+    dev = *create_info;
+    for (uint32_t i = 0; i < create_info->enabledExtensionCount; i++) {
+        enabled_extensions.push_back(create_info->ppEnabledExtensionNames[i]);
+    }
+    for (uint32_t i = 0; i < create_info->enabledLayerCount; i++) {
+        enabled_layers.push_back(create_info->ppEnabledLayerNames[i]);
+    }
+    for (uint32_t i = 0; i < create_info->queueCreateInfoCount; i++) {
+        device_queue_infos.push_back(create_info->pQueueCreateInfos[i]);
+    }
 }
 
 VkDeviceCreateInfo* DeviceCreateInfo::get() noexcept {
+    dev.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dev.enabledLayerCount = static_cast<uint32_t>(enabled_layers.size());
     dev.ppEnabledLayerNames = enabled_layers.data();
     dev.enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size());
     dev.ppEnabledExtensionNames = enabled_extensions.data();
     uint32_t index = 0;
-    for (auto& queue : queue_infos) queue.queueFamilyIndex = index++;
+    for (auto& queue : queue_info_details) {
+        queue.queue_create_info.queueFamilyIndex = index++;
+        queue.queue_create_info.queueCount = 1;
+        device_queue_infos.push_back(queue.get());
+    }
 
-    dev.queueCreateInfoCount = static_cast<uint32_t>(queue_infos.size());
-    dev.pQueueCreateInfos = queue_infos.data();
+    dev.queueCreateInfoCount = static_cast<uint32_t>(device_queue_infos.size());
+    dev.pQueueCreateInfos = device_queue_infos.data();
     return &dev;
 }
-DeviceCreateInfo& DeviceCreateInfo::add_layer(const char* layer_name) {
-    enabled_layers.push_back(layer_name);
 
-    return *this;
-}
-DeviceCreateInfo& DeviceCreateInfo::add_extension(const char* ext_name) {
-    enabled_extensions.push_back(ext_name);
-
-    return *this;
-}
-DeviceCreateInfo& DeviceCreateInfo::add_device_queue(DeviceQueueCreateInfo queue_info_detail) {
-    queue_info_details.push_back(queue_info_detail);
-    return *this;
-}
-
-VkResult CreateInst(InstWrapper& inst, InstanceCreateInfo& inst_info) {
-    return inst.functions->vkCreateInstance(inst_info.get(), inst.callbacks, &inst.inst);
+#if defined(WIN32)
+std::string narrow(const std::wstring& utf16) {
+    if (utf16.empty()) {
+        return {};
+    }
+    int size = WideCharToMultiByte(CP_UTF8, 0, utf16.data(), static_cast<int>(utf16.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) {
+        return {};
+    }
+    std::string utf8(size, '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, utf16.data(), static_cast<int>(utf16.size()), &utf8[0], size, nullptr, nullptr) != size) {
+        return {};
+    }
+    return utf8;
 }
 
-VkResult CreatePhysDevs(InstWrapper& inst, uint32_t phys_dev_count, std::vector<VkPhysicalDevice>& physical_devices) {
-    physical_devices.resize(phys_dev_count);
-    uint32_t physical_count = phys_dev_count;
-    return inst.functions->vkEnumeratePhysicalDevices(inst.inst, &physical_count, physical_devices.data());
+std::wstring widen(const std::string& utf8) {
+    if (utf8.empty()) {
+        return {};
+    }
+    int size = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (size <= 0) {
+        return {};
+    }
+    std::wstring utf16(size, L'\0');
+    if (MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), &utf16[0], size) != size) {
+        return {};
+    }
+    return utf16;
 }
-
-VkResult CreatePhysDev(InstWrapper& inst, VkPhysicalDevice& physical_device) {
-    uint32_t physical_count = 1;
-    return inst.functions->vkEnumeratePhysicalDevices(inst.inst, &physical_count, &physical_device);
-}
-
-VkResult CreateDevice(VkPhysicalDevice phys_dev, DeviceWrapper& dev, DeviceCreateInfo& dev_info) {
-    return dev.functions->vkCreateDevice(phys_dev, dev_info.get(), dev.callbacks, &dev.dev);
-}
-
-VkResult CreateDebugUtilsMessenger(DebugUtilsWrapper& debug_utils) {
-    return debug_utils.vkCreateDebugUtilsMessengerEXT(debug_utils.inst, debug_utils.get(), debug_utils.callbacks,
-                                                      &debug_utils.messenger);
-}
-
-void FillDebugUtilsCreateDetails(InstanceCreateInfo& create_info, DebugUtilsLogger& logger) {
-    create_info.add_extension("VK_EXT_debug_utils");
-    create_info.inst_info.pNext = logger.get();
-}
-void FillDebugUtilsCreateDetails(InstanceCreateInfo& create_info, DebugUtilsWrapper& wrapper) {
-    create_info.add_extension("VK_EXT_debug_utils");
-    create_info.inst_info.pNext = wrapper.get();
-}
+#endif

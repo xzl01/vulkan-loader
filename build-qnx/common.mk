@@ -20,9 +20,9 @@ NAME=vulkan
 
 # Make the library
 
-SRCS = cJSON.c debug_utils.c dev_ext_trampoline.c loader.c murmurhash.c \
+SRCS = cJSON.c debug_utils.c dev_ext_trampoline.c loader.c \
 	phys_dev_ext.c trampoline.c unknown_ext_chain.c wsi.c \
-	extension_manual.c
+	extension_manual.c unknown_function_handling.c
 
 LDFLAGS += -Wl,--unresolved-symbols=report-all -Wl,--no-undefined -Wl,-fPIC
 
@@ -31,7 +31,7 @@ include $(MKFILES_ROOT)/qtargets.mk
 CCFLAGS += -DVK_USE_PLATFORM_SCREEN_QNX=1 -Dvulkan_EXPORTS
 CCFLAGS += -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
 CCFLAGS += -fno-strict-aliasing -fno-builtin-memcmp -Wno-stringop-truncation
-CCFLAGS += -Wno-stringop-overflow -Wimplicit-fallthrough=0 -fvisibility=hidden
+CCFLAGS += -Wno-stringop-overflow -fvisibility=hidden
 CCFLAGS += -Wpointer-arith -fPIC
 
 # Enable this if required

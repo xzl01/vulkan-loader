@@ -1,7 +1,7 @@
 /*
- * Copyright (c) 2015-2017 The Khronos Group Inc.
- * Copyright (c) 2015-2017 Valve Corporation
- * Copyright (c) 2015-2017 LunarG, Inc.
+ * Copyright (c) 2015-2021 The Khronos Group Inc.
+ * Copyright (c) 2015-2021 Valve Corporation
+ * Copyright (c) 2015-2021 LunarG, Inc.
  * Copyright (C) 2015-2016 Google Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,24 +19,27 @@
  * Author: Courtney Goeltzenleuchter <courtney@LunarG.com>
  * Author: Jon Ashburn <jon@LunarG.com>
  * Author: Mark Young <marky@lunarg.com>
+ * Author: Charles Giessen <charles@lunarg.com>
  *
  */
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
 #include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #ifndef WIN32
 #include <signal.h>
 #else
 #endif
-#include "vk_loader_platform.h"
-#include "debug_utils.h"
+
 #include "vulkan/vk_layer.h"
 #include "vk_object_types.h"
+
+#include "allocation.h"
+#include "debug_utils.h"
+#include "log.h"
+#include "loader.h"
+#include "vk_loader_platform.h"
 
 // VK_EXT_debug_report related items
 
@@ -44,21 +47,12 @@ VkResult util_CreateDebugUtilsMessenger(struct loader_instance *inst, const VkDe
                                         const VkAllocationCallbacks *pAllocator, VkDebugUtilsMessengerEXT messenger) {
     VkLayerDbgFunctionNode *pNewDbgFuncNode = NULL;
 
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pNewDbgFuncNode = (VkLayerDbgFunctionNode *)pAllocator->pfnAllocation(pAllocator->pUserData, sizeof(VkLayerDbgFunctionNode),
-                                                                              sizeof(int *), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-    } else {
-#endif
-        pNewDbgFuncNode = (VkLayerDbgFunctionNode *)loader_instance_heap_alloc(inst, sizeof(VkLayerDbgFunctionNode),
-                                                                               VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-    }
+    pNewDbgFuncNode = (VkLayerDbgFunctionNode *)loader_calloc_with_instance_fallback(
+        pAllocator, inst, sizeof(VkLayerDbgFunctionNode), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+
     if (!pNewDbgFuncNode) {
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
-    memset(pNewDbgFuncNode, 0, sizeof(VkLayerDbgFunctionNode));
 
     pNewDbgFuncNode->is_messenger = true;
     pNewDbgFuncNode->messenger.messenger = messenger;
@@ -77,7 +71,7 @@ debug_utils_CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtils
                                          const VkAllocationCallbacks *pAllocator, VkDebugUtilsMessengerEXT *pMessenger) {
     struct loader_instance *inst = loader_get_instance(instance);
     loader_platform_thread_lock_mutex(&loader_lock);
-    VkResult result = inst->disp->layer_inst_disp.CreateDebugUtilsMessengerEXT(instance, pCreateInfo, pAllocator, pMessenger);
+    VkResult result = inst->disp->layer_inst_disp.CreateDebugUtilsMessengerEXT(inst->instance, pCreateInfo, pAllocator, pMessenger);
     loader_platform_thread_unlock_mutex(&loader_lock);
     return result;
 }
@@ -128,15 +122,7 @@ void util_DestroyDebugUtilsMessenger(struct loader_instance *inst, VkDebugUtilsM
         if (pTrav->is_messenger && pTrav->messenger.messenger == messenger) {
             pPrev->pNext = pTrav->pNext;
             if (inst->DbgFunctionHead == pTrav) inst->DbgFunctionHead = pTrav->pNext;
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-            {
-#else
-            if (pAllocator != NULL) {
-                pAllocator->pfnFree(pAllocator->pUserData, pTrav);
-            } else {
-#endif
-                loader_instance_heap_free(inst, pTrav);
-            }
+            loader_free_with_instance_fallback(pAllocator, inst, pTrav);
             break;
         }
         pPrev = pTrav;
@@ -144,116 +130,23 @@ void util_DestroyDebugUtilsMessenger(struct loader_instance *inst, VkDebugUtilsM
     }
 }
 
-// This utility (used by vkInstanceCreateInfo(), looks at a pNext chain.  It
-// counts any VkDebugUtilsMessengerCreateInfoEXT structs that it finds.  It
-// then allocates array that can hold that many structs, as well as that many
-// VkDebugUtilsMessengerEXT handles.  It then copies each
-// VkDebugUtilsMessengerCreateInfoEXT, and initializes each handle.
-VkResult util_CopyDebugUtilsMessengerCreateInfos(const void *pChain, const VkAllocationCallbacks *pAllocator,
-                                                 uint32_t *num_messengers, VkDebugUtilsMessengerCreateInfoEXT **infos,
-                                                 VkDebugUtilsMessengerEXT **messengers) {
-    uint32_t n = *num_messengers = 0;
-    VkDebugUtilsMessengerCreateInfoEXT *pInfos = NULL;
-    VkDebugUtilsMessengerEXT *pMessengers = NULL;
-
+VkResult util_CreateDebugUtilsMessengers(struct loader_instance *inst, const void *pChain,
+                                         const VkAllocationCallbacks *pAllocator) {
     const void *pNext = pChain;
     while (pNext) {
-        // 1st, count the number VkDebugUtilsMessengerCreateInfoEXT:
-        if (((VkDebugUtilsMessengerCreateInfoEXT *)pNext)->sType == VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT) {
-            n++;
-        }
-        pNext = (void *)((VkDebugUtilsMessengerCreateInfoEXT *)pNext)->pNext;
-    }
-    if (n == 0) {
-        return VK_SUCCESS;
-    }
-
-// 2nd, allocate memory for each VkDebugUtilsMessengerCreateInfoEXT:
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pInfos = *infos = ((VkDebugUtilsMessengerCreateInfoEXT *)pAllocator->pfnAllocation(
-            pAllocator->pUserData, n * sizeof(VkDebugUtilsMessengerCreateInfoEXT), sizeof(void *),
-            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT));
-    } else {
-#endif
-        pInfos = *infos = ((VkDebugUtilsMessengerCreateInfoEXT *)malloc(n * sizeof(VkDebugUtilsMessengerCreateInfoEXT)));
-    }
-    if (!pInfos) {
-        return VK_ERROR_OUT_OF_HOST_MEMORY;
-    }
-// 3rd, allocate memory for a unique handle for each callback:
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pMessengers = *messengers = ((VkDebugUtilsMessengerEXT *)pAllocator->pfnAllocation(
-            pAllocator->pUserData, n * sizeof(VkDebugUtilsMessengerEXT), sizeof(void *), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT));
-        if (NULL == pMessengers) {
-            pAllocator->pfnFree(pAllocator->pUserData, pInfos);
-            return VK_ERROR_OUT_OF_HOST_MEMORY;
-        }
-    } else {
-#endif
-        pMessengers = *messengers = ((VkDebugUtilsMessengerEXT *)malloc(n * sizeof(VkDebugUtilsMessengerEXT)));
-        if (NULL == pMessengers) {
-            free(pInfos);
-            return VK_ERROR_OUT_OF_HOST_MEMORY;
-        }
-    }
-    // 4th, copy each VkDebugUtilsMessengerCreateInfoEXT for use by
-    // vkDestroyInstance, and assign a unique handle to each messenger (just
-    // use the address of the copied VkDebugUtilsMessengerCreateInfoEXT):
-    pNext = pChain;
-    while (pNext) {
-        if (((VkInstanceCreateInfo *)pNext)->sType == VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT) {
-            memcpy(pInfos, pNext, sizeof(VkDebugUtilsMessengerCreateInfoEXT));
-            *pMessengers++ = (VkDebugUtilsMessengerEXT)(uintptr_t)pInfos++;
-        }
-        pNext = (void *)((VkInstanceCreateInfo *)pNext)->pNext;
-    }
-
-    *num_messengers = n;
-    return VK_SUCCESS;
-}
-
-void util_FreeDebugUtilsMessengerCreateInfos(const VkAllocationCallbacks *pAllocator, VkDebugUtilsMessengerCreateInfoEXT *infos,
-                                             VkDebugUtilsMessengerEXT *messengers) {
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pAllocator->pfnFree(pAllocator->pUserData, infos);
-        pAllocator->pfnFree(pAllocator->pUserData, messengers);
-    } else {
-#endif
-        free(infos);
-        free(messengers);
-    }
-}
-
-VkResult util_CreateDebugUtilsMessengers(struct loader_instance *inst, const VkAllocationCallbacks *pAllocator,
-                                         uint32_t num_messengers, VkDebugUtilsMessengerCreateInfoEXT *infos,
-                                         VkDebugUtilsMessengerEXT *messengers) {
-    VkResult rtn = VK_SUCCESS;
-    for (uint32_t i = 0; i < num_messengers; i++) {
-        rtn = util_CreateDebugUtilsMessenger(inst, &infos[i], pAllocator, messengers[i]);
-        if (rtn != VK_SUCCESS) {
-            for (uint32_t j = 0; j < i; j++) {
-                util_DestroyDebugUtilsMessenger(inst, messengers[j], pAllocator);
+        if (((const VkBaseInStructure *)pNext)->sType == VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT) {
+            // Assign a unique handle to each messenger (just use the address of the VkDebugUtilsMessengerCreateInfoEXT)
+            // This is only being used this way due to it being for an 'anonymous' callback during instance creation
+            VkDebugUtilsMessengerEXT messenger_handle = (VkDebugUtilsMessengerEXT)(uintptr_t)pNext;
+            VkResult ret = util_CreateDebugUtilsMessenger(inst, (const VkDebugUtilsMessengerCreateInfoEXT *)pNext, pAllocator,
+                                                          messenger_handle);
+            if (ret != VK_SUCCESS) {
+                return ret;
             }
-            return rtn;
         }
+        pNext = (void *)((VkBaseInStructure *)pNext)->pNext;
     }
-    return rtn;
-}
-
-void util_DestroyDebugUtilsMessengers(struct loader_instance *inst, const VkAllocationCallbacks *pAllocator,
-                                      uint32_t num_messengers, VkDebugUtilsMessengerEXT *messengers) {
-    for (uint32_t i = 0; i < num_messengers; i++) {
-        util_DestroyDebugUtilsMessenger(inst, messengers[i], pAllocator);
-    }
+    return VK_SUCCESS;
 }
 
 static VKAPI_ATTR void VKAPI_CALL debug_utils_SubmitDebugUtilsMessageEXT(
@@ -261,7 +154,7 @@ static VKAPI_ATTR void VKAPI_CALL debug_utils_SubmitDebugUtilsMessageEXT(
     const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData) {
     struct loader_instance *inst = loader_get_instance(instance);
 
-    inst->disp->layer_inst_disp.SubmitDebugUtilsMessageEXT(instance, messageSeverity, messageTypes, pCallbackData);
+    inst->disp->layer_inst_disp.SubmitDebugUtilsMessageEXT(inst->instance, messageSeverity, messageTypes, pCallbackData);
 }
 
 static VKAPI_ATTR void VKAPI_CALL debug_utils_DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT messenger,
@@ -269,7 +162,7 @@ static VKAPI_ATTR void VKAPI_CALL debug_utils_DestroyDebugUtilsMessengerEXT(VkIn
     struct loader_instance *inst = loader_get_instance(instance);
     loader_platform_thread_lock_mutex(&loader_lock);
 
-    inst->disp->layer_inst_disp.DestroyDebugUtilsMessengerEXT(instance, messenger, pAllocator);
+    inst->disp->layer_inst_disp.DestroyDebugUtilsMessengerEXT(inst->instance, messenger, pAllocator);
 
     loader_platform_thread_unlock_mutex(&loader_lock);
 }
@@ -286,20 +179,9 @@ VKAPI_ATTR VkResult VKAPI_CALL terminator_CreateDebugUtilsMessengerEXT(VkInstanc
     uint32_t storage_idx;
     VkLayerDbgFunctionNode *pNewDbgFuncNode = NULL;
 
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        icd_info = ((VkDebugUtilsMessengerEXT *)pAllocator->pfnAllocation(pAllocator->pUserData,
-                                                                          inst->total_icd_count * sizeof(VkDebugUtilsMessengerEXT),
-                                                                          sizeof(void *), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT));
-        if (icd_info) {
-            memset(icd_info, 0, inst->total_icd_count * sizeof(VkDebugUtilsMessengerEXT));
-        }
-    } else {
-#endif
-        icd_info = calloc(sizeof(VkDebugUtilsMessengerEXT), inst->total_icd_count);
-    }
+    icd_info = (VkDebugUtilsMessengerEXT *)loader_calloc_with_instance_fallback(
+        pAllocator, inst, inst->total_icd_count * sizeof(VkDebugUtilsMessengerEXT), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+
     if (!icd_info) {
         res = VK_ERROR_OUT_OF_HOST_MEMORY;
         goto out;
@@ -319,25 +201,15 @@ VKAPI_ATTR VkResult VKAPI_CALL terminator_CreateDebugUtilsMessengerEXT(VkInstanc
         storage_idx++;
     }
 
-// Setup the debug report callback in the terminator since a layer may want
-// to grab the information itself (RenderDoc) and then return back to the
-// user callback a sub-set of the messages.
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 0)
-    if (pAllocator != NULL) {
-        pNewDbgFuncNode = (VkLayerDbgFunctionNode *)pAllocator->pfnAllocation(pAllocator->pUserData, sizeof(VkLayerDbgFunctionNode),
-                                                                              sizeof(int *), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-    } else {
-#else
-    {
-#endif
-        pNewDbgFuncNode = (VkLayerDbgFunctionNode *)loader_instance_heap_alloc(inst, sizeof(VkLayerDbgFunctionNode),
-                                                                               VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-    }
+    // Setup the debug report callback in the terminator since a layer may want
+    // to grab the information itself (RenderDoc) and then return back to the
+    // user callback a sub-set of the messages.
+    pNewDbgFuncNode = (VkLayerDbgFunctionNode *)loader_calloc_with_instance_fallback(
+        pAllocator, inst, sizeof(VkLayerDbgFunctionNode), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
     if (!pNewDbgFuncNode) {
         res = VK_ERROR_OUT_OF_HOST_MEMORY;
         goto out;
     }
-    memset(pNewDbgFuncNode, 0, sizeof(VkLayerDbgFunctionNode));
 
     pNewDbgFuncNode->is_messenger = true;
     pNewDbgFuncNode->messenger.pfnUserCallback = pCreateInfo->pfnUserCallback;
@@ -365,26 +237,8 @@ out:
             }
             storage_idx++;
         }
-
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-        {
-#else
-        if (pAllocator != NULL) {
-            if (NULL != pNewDbgFuncNode) {
-                pAllocator->pfnFree(pAllocator->pUserData, pNewDbgFuncNode);
-            }
-            if (NULL != icd_info) {
-                pAllocator->pfnFree(pAllocator->pUserData, icd_info);
-            }
-        } else {
-#endif
-            if (NULL != pNewDbgFuncNode) {
-                free(pNewDbgFuncNode);
-            }
-            if (NULL != icd_info) {
-                free(icd_info);
-            }
-        }
+        loader_free_with_instance_fallback(pAllocator, inst, pNewDbgFuncNode);
+        loader_free_with_instance_fallback(pAllocator, inst, icd_info);
     }
 
     return res;
@@ -413,15 +267,7 @@ VKAPI_ATTR void VKAPI_CALL terminator_DestroyDebugUtilsMessengerEXT(VkInstance i
 
     util_DestroyDebugUtilsMessenger(inst, messenger, pAllocator);
 
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pAllocator->pfnFree(pAllocator->pUserData, icd_info);
-    } else {
-#endif
-        free(icd_info);
-    }
+    loader_free_with_instance_fallback(pAllocator, inst, icd_info);
 }
 
 // This is the instance chain terminator function for SubmitDebugUtilsMessageEXT
@@ -441,25 +287,15 @@ VKAPI_ATTR void VKAPI_CALL terminator_SubmitDebugUtilsMessageEXT(VkInstance inst
 
 // VK_EXT_debug_report related items
 
-VkResult util_CreateDebugReportCallback(struct loader_instance *inst, VkDebugReportCallbackCreateInfoEXT *pCreateInfo,
+VkResult util_CreateDebugReportCallback(struct loader_instance *inst, const VkDebugReportCallbackCreateInfoEXT *pCreateInfo,
                                         const VkAllocationCallbacks *pAllocator, VkDebugReportCallbackEXT callback) {
     VkLayerDbgFunctionNode *pNewDbgFuncNode = NULL;
 
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pNewDbgFuncNode = (VkLayerDbgFunctionNode *)pAllocator->pfnAllocation(pAllocator->pUserData, sizeof(VkLayerDbgFunctionNode),
-                                                                              sizeof(int *), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-    } else {
-#endif
-        pNewDbgFuncNode = (VkLayerDbgFunctionNode *)loader_instance_heap_alloc(inst, sizeof(VkLayerDbgFunctionNode),
-                                                                               VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-    }
+    pNewDbgFuncNode = (VkLayerDbgFunctionNode *)loader_calloc_with_instance_fallback(
+        pAllocator, inst, sizeof(VkLayerDbgFunctionNode), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
     if (!pNewDbgFuncNode) {
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
-    memset(pNewDbgFuncNode, 0, sizeof(VkLayerDbgFunctionNode));
 
     pNewDbgFuncNode->is_messenger = false;
     pNewDbgFuncNode->report.msgCallback = callback;
@@ -477,7 +313,7 @@ debug_utils_CreateDebugReportCallbackEXT(VkInstance instance, const VkDebugRepor
                                          const VkAllocationCallbacks *pAllocator, VkDebugReportCallbackEXT *pCallback) {
     struct loader_instance *inst = loader_get_instance(instance);
     loader_platform_thread_lock_mutex(&loader_lock);
-    VkResult result = inst->disp->layer_inst_disp.CreateDebugReportCallbackEXT(instance, pCreateInfo, pAllocator, pCallback);
+    VkResult result = inst->disp->layer_inst_disp.CreateDebugReportCallbackEXT(inst->instance, pCreateInfo, pAllocator, pCallback);
     loader_platform_thread_unlock_mutex(&loader_lock);
     return result;
 }
@@ -536,15 +372,7 @@ void util_DestroyDebugReportCallback(struct loader_instance *inst, VkDebugReport
         if (!pTrav->is_messenger && pTrav->report.msgCallback == callback) {
             pPrev->pNext = pTrav->pNext;
             if (inst->DbgFunctionHead == pTrav) inst->DbgFunctionHead = pTrav->pNext;
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-            {
-#else
-            if (pAllocator != NULL) {
-                pAllocator->pfnFree(pAllocator->pUserData, pTrav);
-            } else {
-#endif
-                loader_instance_heap_free(inst, pTrav);
-            }
+            loader_free_with_instance_fallback(pAllocator, inst, pTrav);
             break;
         }
         pPrev = pTrav;
@@ -552,115 +380,23 @@ void util_DestroyDebugReportCallback(struct loader_instance *inst, VkDebugReport
     }
 }
 
-// This utility (used by vkInstanceCreateInfo(), looks at a pNext chain.  It
-// counts any VkDebugReportCallbackCreateInfoEXT structs that it finds.  It
-// then allocates array that can hold that many structs, as well as that many
-// VkDebugReportCallbackEXT handles.  It then copies each
-// VkDebugReportCallbackCreateInfoEXT, and initializes each handle.
-VkResult util_CopyDebugReportCreateInfos(const void *pChain, const VkAllocationCallbacks *pAllocator, uint32_t *num_callbacks,
-                                         VkDebugReportCallbackCreateInfoEXT **infos, VkDebugReportCallbackEXT **callbacks) {
-    uint32_t n = *num_callbacks = 0;
-    VkDebugReportCallbackCreateInfoEXT *pInfos = NULL;
-    VkDebugReportCallbackEXT *pCallbacks = NULL;
-
+VkResult util_CreateDebugReportCallbacks(struct loader_instance *inst, const void *pChain,
+                                         const VkAllocationCallbacks *pAllocator) {
     const void *pNext = pChain;
     while (pNext) {
-        // 1st, count the number VkDebugReportCallbackCreateInfoEXT:
-        if (((VkDebugReportCallbackCreateInfoEXT *)pNext)->sType == VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT) {
-            n++;
-        }
-        pNext = (void *)((VkDebugReportCallbackCreateInfoEXT *)pNext)->pNext;
-    }
-    if (n == 0) {
-        return VK_SUCCESS;
-    }
-
-// 2nd, allocate memory for each VkDebugReportCallbackCreateInfoEXT:
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pInfos = *infos = ((VkDebugReportCallbackCreateInfoEXT *)pAllocator->pfnAllocation(
-            pAllocator->pUserData, n * sizeof(VkDebugReportCallbackCreateInfoEXT), sizeof(void *),
-            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT));
-    } else {
-#endif
-        pInfos = *infos = ((VkDebugReportCallbackCreateInfoEXT *)malloc(n * sizeof(VkDebugReportCallbackCreateInfoEXT)));
-    }
-    if (!pInfos) {
-        return VK_ERROR_OUT_OF_HOST_MEMORY;
-    }
-// 3rd, allocate memory for a unique handle for each callback:
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pCallbacks = *callbacks = ((VkDebugReportCallbackEXT *)pAllocator->pfnAllocation(
-            pAllocator->pUserData, n * sizeof(VkDebugReportCallbackEXT), sizeof(void *), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT));
-        if (!pCallbacks) {
-            pAllocator->pfnFree(pAllocator->pUserData, pInfos);
-            return VK_ERROR_OUT_OF_HOST_MEMORY;
-        }
-    } else {
-#endif
-        pCallbacks = *callbacks = ((VkDebugReportCallbackEXT *)malloc(n * sizeof(VkDebugReportCallbackEXT)));
-        if (!pCallbacks) {
-            free(pInfos);
-            return VK_ERROR_OUT_OF_HOST_MEMORY;
-        }
-    }
-    // 4th, copy each VkDebugReportCallbackCreateInfoEXT for use by
-    // vkDestroyInstance, and assign a unique handle to each callback (just
-    // use the address of the copied VkDebugReportCallbackCreateInfoEXT):
-    pNext = pChain;
-    while (pNext) {
-        if (((VkInstanceCreateInfo *)pNext)->sType == VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT) {
-            memcpy(pInfos, pNext, sizeof(VkDebugReportCallbackCreateInfoEXT));
-            *pCallbacks++ = (VkDebugReportCallbackEXT)(uintptr_t)pInfos++;
-        }
-        pNext = (void *)((VkInstanceCreateInfo *)pNext)->pNext;
-    }
-
-    *num_callbacks = n;
-    return VK_SUCCESS;
-}
-
-void util_FreeDebugReportCreateInfos(const VkAllocationCallbacks *pAllocator, VkDebugReportCallbackCreateInfoEXT *infos,
-                                     VkDebugReportCallbackEXT *callbacks) {
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pAllocator->pfnFree(pAllocator->pUserData, infos);
-        pAllocator->pfnFree(pAllocator->pUserData, callbacks);
-    } else {
-#endif
-        free(infos);
-        free(callbacks);
-    }
-}
-
-VkResult util_CreateDebugReportCallbacks(struct loader_instance *inst, const VkAllocationCallbacks *pAllocator,
-                                         uint32_t num_callbacks, VkDebugReportCallbackCreateInfoEXT *infos,
-                                         VkDebugReportCallbackEXT *callbacks) {
-    VkResult rtn = VK_SUCCESS;
-    for (uint32_t i = 0; i < num_callbacks; i++) {
-        rtn = util_CreateDebugReportCallback(inst, &infos[i], pAllocator, callbacks[i]);
-        if (rtn != VK_SUCCESS) {
-            for (uint32_t j = 0; j < i; j++) {
-                util_DestroyDebugReportCallback(inst, callbacks[j], pAllocator);
+        if (((VkBaseInStructure *)pNext)->sType == VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT) {
+            // Assign a unique handle to each callback (just use the address of the VkDebugReportCallbackCreateInfoEXT):
+            // This is only being used this way due to it being for an 'anonymous' callback during instance creation
+            VkDebugReportCallbackEXT report_handle = (VkDebugReportCallbackEXT)(uintptr_t)pNext;
+            VkResult ret =
+                util_CreateDebugReportCallback(inst, (const VkDebugReportCallbackCreateInfoEXT *)pNext, pAllocator, report_handle);
+            if (ret != VK_SUCCESS) {
+                return ret;
             }
-            return rtn;
         }
+        pNext = (void *)((VkBaseInStructure *)pNext)->pNext;
     }
-    return rtn;
-}
-
-void util_DestroyDebugReportCallbacks(struct loader_instance *inst, const VkAllocationCallbacks *pAllocator, uint32_t num_callbacks,
-                                      VkDebugReportCallbackEXT *callbacks) {
-    for (uint32_t i = 0; i < num_callbacks; i++) {
-        util_DestroyDebugReportCallback(inst, callbacks[i], pAllocator);
-    }
+    return VK_SUCCESS;
 }
 
 static VKAPI_ATTR void VKAPI_CALL debug_utils_DestroyDebugReportCallbackEXT(VkInstance instance, VkDebugReportCallbackEXT callback,
@@ -668,7 +404,7 @@ static VKAPI_ATTR void VKAPI_CALL debug_utils_DestroyDebugReportCallbackEXT(VkIn
     struct loader_instance *inst = loader_get_instance(instance);
     loader_platform_thread_lock_mutex(&loader_lock);
 
-    inst->disp->layer_inst_disp.DestroyDebugReportCallbackEXT(instance, callback, pAllocator);
+    inst->disp->layer_inst_disp.DestroyDebugReportCallbackEXT(inst->instance, callback, pAllocator);
 
     loader_platform_thread_unlock_mutex(&loader_lock);
 }
@@ -679,7 +415,8 @@ static VKAPI_ATTR void VKAPI_CALL debug_utils_DebugReportMessageEXT(VkInstance i
                                                                     const char *pMsg) {
     struct loader_instance *inst = loader_get_instance(instance);
 
-    inst->disp->layer_inst_disp.DebugReportMessageEXT(instance, flags, objType, object, location, msgCode, pLayerPrefix, pMsg);
+    inst->disp->layer_inst_disp.DebugReportMessageEXT(inst->instance, flags, objType, object, location, msgCode, pLayerPrefix,
+                                                      pMsg);
 }
 
 // This is the instance chain terminator function
@@ -695,20 +432,8 @@ VKAPI_ATTR VkResult VKAPI_CALL terminator_CreateDebugReportCallbackEXT(VkInstanc
     uint32_t storage_idx;
     VkLayerDbgFunctionNode *pNewDbgFuncNode = NULL;
 
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        icd_info = ((VkDebugReportCallbackEXT *)pAllocator->pfnAllocation(pAllocator->pUserData,
-                                                                          inst->total_icd_count * sizeof(VkDebugReportCallbackEXT),
-                                                                          sizeof(void *), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT));
-        if (icd_info) {
-            memset(icd_info, 0, inst->total_icd_count * sizeof(VkDebugReportCallbackEXT));
-        }
-    } else {
-#endif
-        icd_info = calloc(sizeof(VkDebugReportCallbackEXT), inst->total_icd_count);
-    }
+    icd_info = ((VkDebugReportCallbackEXT *)loader_calloc_with_instance_fallback(
+        pAllocator, inst, inst->total_icd_count * sizeof(VkDebugReportCallbackEXT), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT));
     if (!icd_info) {
         res = VK_ERROR_OUT_OF_HOST_MEMORY;
         goto out;
@@ -728,25 +453,16 @@ VKAPI_ATTR VkResult VKAPI_CALL terminator_CreateDebugReportCallbackEXT(VkInstanc
         storage_idx++;
     }
 
-// Setup the debug report callback in the terminator since a layer may want
-// to grab the information itself (RenderDoc) and then return back to the
-// user callback a sub-set of the messages.
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 0)
-    if (pAllocator != NULL) {
-        pNewDbgFuncNode = (VkLayerDbgFunctionNode *)pAllocator->pfnAllocation(pAllocator->pUserData, sizeof(VkLayerDbgFunctionNode),
-                                                                              sizeof(int *), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-    } else {
-#else
-    {
-#endif
-        pNewDbgFuncNode = (VkLayerDbgFunctionNode *)loader_instance_heap_alloc(inst, sizeof(VkLayerDbgFunctionNode),
-                                                                               VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-    }
+    // Setup the debug report callback in the terminator since a layer may want
+    // to grab the information itself (RenderDoc) and then return back to the
+    // user callback a sub-set of the messages.
+    pNewDbgFuncNode = (VkLayerDbgFunctionNode *)loader_calloc_with_instance_fallback(
+        pAllocator, inst, sizeof(VkLayerDbgFunctionNode), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+
     if (!pNewDbgFuncNode) {
         res = VK_ERROR_OUT_OF_HOST_MEMORY;
         goto out;
     }
-    memset(pNewDbgFuncNode, 0, sizeof(VkLayerDbgFunctionNode));
 
     pNewDbgFuncNode->is_messenger = false;
     pNewDbgFuncNode->report.pfnMsgCallback = pCreateInfo->pfnCallback;
@@ -773,26 +489,8 @@ out:
             }
             storage_idx++;
         }
-
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-        {
-#else
-        if (pAllocator != NULL) {
-            if (NULL != pNewDbgFuncNode) {
-                pAllocator->pfnFree(pAllocator->pUserData, pNewDbgFuncNode);
-            }
-            if (NULL != icd_info) {
-                pAllocator->pfnFree(pAllocator->pUserData, icd_info);
-            }
-        } else {
-#endif
-            if (NULL != pNewDbgFuncNode) {
-                free(pNewDbgFuncNode);
-            }
-            if (NULL != icd_info) {
-                free(icd_info);
-            }
-        }
+        loader_free_with_instance_fallback(pAllocator, inst, pNewDbgFuncNode);
+        loader_free_with_instance_fallback(pAllocator, inst, icd_info);
     }
 
     return res;
@@ -821,15 +519,7 @@ VKAPI_ATTR void VKAPI_CALL terminator_DestroyDebugReportCallbackEXT(VkInstance i
 
     util_DestroyDebugReportCallback(inst, callback, pAllocator);
 
-#if (DEBUG_DISABLE_APP_ALLOCATORS == 1)
-    {
-#else
-    if (pAllocator != NULL) {
-        pAllocator->pfnFree(pAllocator->pUserData, icd_info);
-    } else {
-#endif
-        free(icd_info);
-    }
+    loader_free_with_instance_fallback(pAllocator, inst, icd_info);
 }
 
 // This is the instance chain terminator function for DebugReportMessage
@@ -863,15 +553,23 @@ static const VkExtensionProperties debug_utils_extension_info[] = {
     {VK_EXT_DEBUG_UTILS_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_SPEC_VERSION},
 };
 
-void debug_utils_AddInstanceExtensions(const struct loader_instance *inst, struct loader_extension_list *ext_list) {
+void destroy_debug_callbacks_chain(struct loader_instance *inst, const VkAllocationCallbacks *pAllocator) {
+    VkLayerDbgFunctionNode *pTrav = inst->DbgFunctionHead;
+    VkLayerDbgFunctionNode *pNext = NULL;
+    while (pTrav) {
+        pNext = pTrav->pNext;
+        loader_free_with_instance_fallback(pAllocator, inst, pTrav);
+        pTrav = pNext;
+    }
+    inst->DbgFunctionHead = NULL;
+}
+
+void add_debug_extensions_to_ext_list(const struct loader_instance *inst, struct loader_extension_list *ext_list) {
     loader_add_to_ext_list(inst, ext_list, sizeof(debug_utils_extension_info) / sizeof(VkExtensionProperties),
                            debug_utils_extension_info);
 }
 
-void debug_utils_CreateInstance(struct loader_instance *ptr_instance, const VkInstanceCreateInfo *pCreateInfo) {
-    ptr_instance->enabled_known_extensions.ext_debug_report = 0;
-    ptr_instance->enabled_known_extensions.ext_debug_utils = 0;
-
+void check_for_enabled_debug_extensions(struct loader_instance *ptr_instance, const VkInstanceCreateInfo *pCreateInfo) {
     for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
         if (strcmp(pCreateInfo->ppEnabledExtensionNames[i], VK_EXT_DEBUG_REPORT_EXTENSION_NAME) == 0) {
             ptr_instance->enabled_known_extensions.ext_debug_report = 1;
@@ -881,7 +579,7 @@ void debug_utils_CreateInstance(struct loader_instance *ptr_instance, const VkIn
     }
 }
 
-bool debug_utils_InstanceGpa(struct loader_instance *ptr_instance, const char *name, void **addr) {
+bool debug_extensions_InstanceGpa(struct loader_instance *ptr_instance, const char *name, void **addr) {
     bool ret_type = false;
 
     *addr = NULL;
