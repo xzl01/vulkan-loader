@@ -14,7 +14,9 @@ override_dh_clean:
 		include \
 		scripts/__pycache__ \
 		vulkan-headers/registry/__pycache__
-	rm -f external/googletest
+	rm -f external
+	rm -rf debian/tmp-vulkan-headers
+	rm -rf build-vulkan-headers
 
 override_dh_auto_configure:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
@@ -29,10 +31,11 @@ endif
 	-DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_INSTALL_LIBDIR=/usr/lib/$(DEB_HOST_MULTIARCH) \
 	-DBUILD_WSI_MIR_SUPPORT=OFF \
-	-DVulkanHeaders_DIR=debian/tmp-vulkan-headers/usr/lib/$(DEB_HOST_MULTIARCH)/cmake/VulkanHeaders/
+	-DLOADER_CODEGEN=ON \
+	-DVULKAN_HEADERS_INSTALL_DIR=$(CURDIR)/debian/tmp-vulkan-headers/usr
 
 override_dh_auto_build:
-	dh_auto_build -- VulkanLoader_generated_source
+	dh_auto_build -- loader_codegen
 	dh_auto_build
 
 override_dh_auto_test:
