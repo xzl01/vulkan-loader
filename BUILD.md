@@ -16,6 +16,7 @@ Instructions for building this repository on Linux, Windows, and MacOS.
     - [Repository Dependencies](#repository-dependencies)
       - [Vulkan-Headers](#vulkan-headers)
       - [Test Dependencies](#test-dependencies)
+    - [Warnings as errors off by default!](#warnings-as-errors-off-by-default)
     - [Build and Install Directory Locations](#build-and-install-directory-locations)
     - [Building Dependent Repositories with Known-Good Revisions](#building-dependent-repositories-with-known-good-revisions)
       - [Automatically](#automatically)
@@ -54,7 +55,6 @@ Instructions for building this repository on Linux, Windows, and MacOS.
   - [Cross Compilation](#cross-compilation)
     - [Unknown function handling which requires explicit assembly implementations](#unknown-function-handling-which-requires-explicit-assembly-implementations)
       - [Platforms which fully support unknown function handling](#platforms-which-fully-support-unknown-function-handling)
-    - [Link Time Optimization](#link-time-optimization)
   - [Tests](#tests)
 
 
@@ -126,6 +126,16 @@ To build the tests, pass both `-D UPDATE_DEPS=ON` and `-D BUILD_TESTS=ON` option
 cmake ... -D UPDATE_DEPS=ON -D BUILD_TESTS=ON ...
 ```
 This will ensure googletest and detours is downloaded and the appropriate version is used.
+
+### Warnings as errors off by default!
+
+By default `BUILD_WERROR` is `OFF`. The idiom for open source projects is to NOT enable warnings as errors.
+
+System/language package managers have to build on multiple different platforms and compilers.
+
+By defaulting to `ON` we cause issues for package managers since there is no standard way to disable warnings.
+
+Add `-D BUILD_WERROR=ON` to your workflow
 
 ### Build and Install Directory Locations
 
@@ -232,7 +242,6 @@ The following is a table of all on/off options currently supported by this repos
 | ENABLE_WIN10_ONECORE            | Windows       | `OFF`   | Link the loader to the [OneCore](https://msdn.microsoft.com/en-us/library/windows/desktop/mt654039.aspx) umbrella library, instead of the standard Win32 ones.                    |
 | USE_GAS                         | Linux         | `ON`    | Controls whether to build assembly files with the GNU assembler, else fallback to C code.                                                                                         |
 | USE_MASM                        | Windows       | `ON`    | Controls whether to build assembly files with MS assembler, else fallback to C code                                                                                               |
-| BUILD_STATIC_LOADER             | macOS         | `OFF`   | This allows the loader to be built as a static library on macOS. Not tested, use at your own risk.                                                                                |
 | LOADER_ENABLE_ADDRESS_SANITIZER | Linux & macOS | `OFF`   | Enables Address Sanitizer in the loader and tests.                                                                                                                                |
 | LOADER_ENABLE_THREAD_SANITIZER  | Linux & macOS | `OFF`   | Enables Thread Sanitizer in the loader and tests.                                                                                                                                 |
 | LOADER_USE_UNSAFE_FILE_SEARCH   | All           | `OFF`   | Disables security policies that prevent unsecure locations from being used when running with elevated permissions.                                                                |
@@ -534,10 +543,6 @@ regularly as a part of CI.
 
 ### MacOS Development Environment Requirements
 
-Tested on OSX version 10.12
-
-NOTE: To force the OSX version set the environment variable [MACOSX_DEPLOYMENT_TARGET](https://cmake.org/cmake/help/latest/envvar/MACOSX_DEPLOYMENT_TARGET.html) when building.
-
 Setup Homebrew and components
 
 - Ensure Homebrew is at the beginning of your PATH:
@@ -607,7 +612,7 @@ QNX is using its own build system. The proper build environment must be set
 under the QNX host development system (Linux, Win64, MacOS) by invoking
 the shell/batch script provided with QNX installation.
 
-Then change working directory to the "build-qnx" in this project and type "make".
+Then change working directory to the "scripts/qnx" in this project and type "make".
 It will build the ICD loader for all CPU targets supported by QNX.
 
 ## Cross Compilation
@@ -628,14 +633,11 @@ can be manually disabled by setting `USE_GAS` or `USE_MASM` to `OFF`.
 * 64 bit Linux (x64)
 * 32 bit Linux (x86)
 * 64 bit Arm (aarch64)
+* 32 bit Arm (aarch32)
+
 
 Platforms not listed will use a fallback C Code path that relies on tail-call optimization to work.
 No guarantees are made about the use of the fallback code paths.
-
-### Link Time Optimization
-
-When cross compiling, the use of Link Time Optimization (LTO) and unknown function handling
-is not supported. Either LTO needs to be turned off, or the assembly should be disabled.
 
 ## Tests
 

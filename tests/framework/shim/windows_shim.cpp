@@ -82,19 +82,21 @@ NTSTATUS APIENTRY ShimQueryAdapterInfo(const LoaderQueryAdapterInfo *query_info)
     auto *reg_info = reinterpret_cast<LoaderQueryRegistryInfo *>(query_info->private_data);
 
     std::vector<std::wstring> *paths = nullptr;
-    if (reg_info->value_name[6] == L'D') {  // looking for drivers
+    if (wcsstr(reg_info->value_name, L"DriverName") != nullptr) {  // looking for drivers
         paths = &adapter.driver_paths;
-    } else if (reg_info->value_name[6] == L'I') {  // looking for implicit layers
+    } else if (wcsstr(reg_info->value_name, L"ImplicitLayers") != nullptr) {  // looking for implicit layers
         paths = &adapter.implicit_layer_paths;
-    } else if (reg_info->value_name[6] == L'E') {  // looking for explicit layers
+    } else if (wcsstr(reg_info->value_name, L"ExplicitLayers") != nullptr) {  // looking for explicit layers
         paths = &adapter.explicit_layer_paths;
     }
 
     reg_info->status = LOADER_QUERY_REGISTRY_STATUS_SUCCESS;
     if (reg_info->output_value_size == 0) {
-        ULONG size = 2;  // final null terminator
-        for (auto const &path : *paths) size = static_cast<ULONG>(path.length() * sizeof(wchar_t));
-        // size in bytes, so multiply path size by two and add 2 for the null terminator
+        // final null terminator size
+        ULONG size = 2;
+
+        // size is in bytes, so multiply path size + 1 (for null terminator) by size of wchar (basically, 2).
+        for (auto const &path : *paths) size += static_cast<ULONG>((path.length() + 1) * sizeof(wchar_t));
         reg_info->output_value_size = size;
         if (size != 2) {
             // only want to write data if there is path data to write
@@ -168,49 +170,24 @@ HRESULT __stdcall ShimGetDesc1(IDXGIAdapter1 *pAdapter,
                                /* [annotation][out] */
                                _Out_ DXGI_ADAPTER_DESC1 *pDesc) {
     if (pAdapter == nullptr || pDesc == nullptr) return DXGI_ERROR_INVALID_CALL;
-    auto it = platform_shim.dxgi_adapter_map.find(pAdapter);
-    if (it == platform_shim.dxgi_adapter_map.end()) {
-        return DXGI_ERROR_INVALID_CALL;
-    }
-    *pDesc = platform_shim.dxgi_adapters[it->second].desc1;
-    return S_OK;
-}
-ULONG __stdcall ShimIDXGIFactory1Release(IDXGIFactory1 *factory) {
-    if (factory != nullptr) {
-        if (factory->lpVtbl != nullptr) {
-            delete factory->lpVtbl;
-        }
-        delete factory;
-    }
-    return S_OK;
-}
-ULONG __stdcall ShimIDXGIFactory6Release(IDXGIFactory6 *factory) {
-    if (factory != nullptr) {
-        if (factory->lpVtbl != nullptr) {
-            delete factory->lpVtbl;
-        }
-        delete factory;
-    }
-    return S_OK;
-}
 
-ULONG __stdcall ShimRelease(IDXGIAdapter1 *pAdapter) {
-    if (pAdapter != nullptr) {
-        if (pAdapter->lpVtbl != nullptr) {
-            delete pAdapter->lpVtbl;
+    for (const auto &[index, adapter] : platform_shim.dxgi_adapters) {
+        if (&adapter.adapter_instance == pAdapter) {
+            *pDesc = adapter.desc1;
+            return S_OK;
         }
-        delete pAdapter;
     }
-    return S_OK;
+    return DXGI_ERROR_INVALID_CALL;
 }
+ULONG __stdcall ShimIDXGIFactory1Release(IDXGIFactory1 *) { return S_OK; }
+ULONG __stdcall ShimIDXGIFactory6Release(IDXGIFactory6 *) { return S_OK; }
+ULONG __stdcall ShimRelease(IDXGIAdapter1 *) { return S_OK; }
 
-IDXGIAdapter1 *create_IDXGIAdapter1() {
-    IDXGIAdapter1Vtbl *vtbl = new IDXGIAdapter1Vtbl();
-    vtbl->GetDesc1 = ShimGetDesc1;
-    vtbl->Release = ShimRelease;
-    IDXGIAdapter1 *adapter = new IDXGIAdapter1();
-    adapter->lpVtbl = vtbl;
-    return adapter;
+IDXGIAdapter1 *setup_and_get_IDXGIAdapter1(DXGIAdapter &adapter) {
+    adapter.adapter_vtbl_instance.GetDesc1 = ShimGetDesc1;
+    adapter.adapter_vtbl_instance.Release = ShimRelease;
+    adapter.adapter_instance.lpVtbl = &adapter.adapter_vtbl_instance;
+    return &adapter.adapter_instance;
 }
 
 HRESULT __stdcall ShimEnumAdapters1_1([[maybe_unused]] IDXGIFactory1 *This,
@@ -221,9 +198,7 @@ HRESULT __stdcall ShimEnumAdapters1_1([[maybe_unused]] IDXGIFactory1 *This,
         return DXGI_ERROR_INVALID_CALL;
     }
     if (ppAdapter != nullptr) {
-        auto *pAdapter = create_IDXGIAdapter1();
-        *ppAdapter = pAdapter;
-        platform_shim.dxgi_adapter_map[pAdapter] = Adapter;
+        *ppAdapter = setup_and_get_IDXGIAdapter1(platform_shim.dxgi_adapters.at(Adapter));
     }
     return S_OK;
 }
@@ -236,9 +211,7 @@ HRESULT __stdcall ShimEnumAdapters1_6([[maybe_unused]] IDXGIFactory6 *This,
         return DXGI_ERROR_INVALID_CALL;
     }
     if (ppAdapter != nullptr) {
-        auto *pAdapter = create_IDXGIAdapter1();
-        *ppAdapter = pAdapter;
-        platform_shim.dxgi_adapter_map[pAdapter] = Adapter;
+        *ppAdapter = setup_and_get_IDXGIAdapter1(platform_shim.dxgi_adapters.at(Adapter));
     }
     return S_OK;
 }
@@ -254,40 +227,38 @@ HRESULT __stdcall ShimEnumAdapterByGpuPreference([[maybe_unused]] IDXGIFactory6 
     assert(GpuPreference == DXGI_GPU_PREFERENCE::DXGI_GPU_PREFERENCE_UNSPECIFIED &&
            "Test shim assumes the GpuPreference is unspecified.");
     if (ppvAdapter != nullptr) {
-        auto *pAdapter = create_IDXGIAdapter1();
-        *ppvAdapter = pAdapter;
-        platform_shim.dxgi_adapter_map[pAdapter] = Adapter;
+        *ppvAdapter = setup_and_get_IDXGIAdapter1(platform_shim.dxgi_adapters.at(Adapter));
     }
     return S_OK;
 }
 
-IDXGIFactory1 *create_IDXGIFactory1() {
-    IDXGIFactory1Vtbl *vtbl = new IDXGIFactory1Vtbl();
-    vtbl->EnumAdapters1 = ShimEnumAdapters1_1;
-    vtbl->Release = ShimIDXGIFactory1Release;
-    IDXGIFactory1 *factory = new IDXGIFactory1();
-    factory->lpVtbl = vtbl;
-    return factory;
+static IDXGIFactory1 *get_IDXGIFactory1() {
+    static IDXGIFactory1Vtbl vtbl{};
+    vtbl.EnumAdapters1 = ShimEnumAdapters1_1;
+    vtbl.Release = ShimIDXGIFactory1Release;
+    static IDXGIFactory1 factory{};
+    factory.lpVtbl = &vtbl;
+    return &factory;
 }
 
-IDXGIFactory6 *create_IDXGIFactory6() {
-    IDXGIFactory6Vtbl *vtbl = new IDXGIFactory6Vtbl();
-    vtbl->EnumAdapters1 = ShimEnumAdapters1_6;
-    vtbl->EnumAdapterByGpuPreference = ShimEnumAdapterByGpuPreference;
-    vtbl->Release = ShimIDXGIFactory6Release;
-    IDXGIFactory6 *factory = new IDXGIFactory6();
-    factory->lpVtbl = vtbl;
-    return factory;
+static IDXGIFactory6 *get_IDXGIFactory6() {
+    static IDXGIFactory6Vtbl vtbl{};
+    vtbl.EnumAdapters1 = ShimEnumAdapters1_6;
+    vtbl.EnumAdapterByGpuPreference = ShimEnumAdapterByGpuPreference;
+    vtbl.Release = ShimIDXGIFactory6Release;
+    static IDXGIFactory6 factory{};
+    factory.lpVtbl = &vtbl;
+    return &factory;
 }
 
 HRESULT __stdcall ShimCreateDXGIFactory1(REFIID riid, void **ppFactory) {
     if (riid == IID_IDXGIFactory1) {
-        auto *factory = create_IDXGIFactory1();
+        auto *factory = get_IDXGIFactory1();
         *ppFactory = factory;
         return S_OK;
     }
     if (riid == IID_IDXGIFactory6) {
-        auto *factory = create_IDXGIFactory6();
+        auto *factory = get_IDXGIFactory6();
         *ppFactory = factory;
         return S_OK;
     }
@@ -331,17 +302,13 @@ const std::string *get_path_of_created_key(HKEY hKey) {
     return nullptr;
 }
 std::vector<RegistryEntry> *get_registry_vector(std::string const &path) {
-    if (path == "HKEY_LOCAL_MACHINE\\SOFTWARE\\Khronos\\Vulkan\\Drivers") return &platform_shim.hkey_local_machine_drivers;
-    if (path == "HKEY_LOCAL_MACHINE\\SOFTWARE\\Khronos\\Vulkan\\ExplicitLayers")
-        return &platform_shim.hkey_local_machine_explicit_layers;
-    if (path == "HKEY_LOCAL_MACHINE\\SOFTWARE\\Khronos\\Vulkan\\ImplicitLayers")
-        return &platform_shim.hkey_local_machine_implicit_layers;
-    if (path == "HKEY_CURRENT_USER\\SOFTWARE\\Khronos\\Vulkan\\ExplicitLayers")
-        return &platform_shim.hkey_current_user_explicit_layers;
-    if (path == "HKEY_CURRENT_USER\\SOFTWARE\\Khronos\\Vulkan\\ImplicitLayers")
-        return &platform_shim.hkey_current_user_implicit_layers;
-    if (path == "HKEY_LOCAL_MACHINE\\SOFTWARE\\Khronos\\Vulkan\\LoaderSettings") return &platform_shim.hkey_local_machine_settings;
-    if (path == "HKEY_CURRENT_USER\\SOFTWARE\\Khronos\\Vulkan\\LoaderSettings") return &platform_shim.hkey_current_user_settings;
+    if (path == "HKEY_LOCAL_MACHINE\\" VK_DRIVERS_INFO_REGISTRY_LOC) return &platform_shim.hkey_local_machine_drivers;
+    if (path == "HKEY_LOCAL_MACHINE\\" VK_ELAYERS_INFO_REGISTRY_LOC) return &platform_shim.hkey_local_machine_explicit_layers;
+    if (path == "HKEY_LOCAL_MACHINE\\" VK_ILAYERS_INFO_REGISTRY_LOC) return &platform_shim.hkey_local_machine_implicit_layers;
+    if (path == "HKEY_CURRENT_USER\\" VK_ELAYERS_INFO_REGISTRY_LOC) return &platform_shim.hkey_current_user_explicit_layers;
+    if (path == "HKEY_CURRENT_USER\\" VK_ILAYERS_INFO_REGISTRY_LOC) return &platform_shim.hkey_current_user_implicit_layers;
+    if (path == "HKEY_LOCAL_MACHINE\\" VK_SETTINGS_INFO_REGISTRY_LOC) return &platform_shim.hkey_local_machine_settings;
+    if (path == "HKEY_CURRENT_USER\\" VK_SETTINGS_INFO_REGISTRY_LOC) return &platform_shim.hkey_current_user_settings;
     return nullptr;
 }
 LSTATUS __stdcall ShimRegQueryValueExA(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD) {
@@ -359,12 +326,13 @@ LSTATUS __stdcall ShimRegEnumValueA(HKEY hKey, DWORD dwIndex, LPSTR lpValueName,
     const auto &location = *location_ptr;
     if (dwIndex >= location.size()) return ERROR_NO_MORE_ITEMS;
 
-    if (*lpcchValueName < location[dwIndex].name.size()) return ERROR_NO_MORE_ITEMS;
-    for (size_t i = 0; i < location[dwIndex].name.size(); i++) {
-        lpValueName[i] = location[dwIndex].name[i];
+    std::string name = narrow(location[dwIndex].name);
+    if (*lpcchValueName < name.size()) return ERROR_NO_MORE_ITEMS;
+    for (size_t i = 0; i < name.size(); i++) {
+        lpValueName[i] = name[i];
     }
-    lpValueName[location[dwIndex].name.size()] = '\0';
-    *lpcchValueName = static_cast<DWORD>(location[dwIndex].name.size() + 1);
+    lpValueName[name.size()] = '\0';
+    *lpcchValueName = static_cast<DWORD>(name.size() + 1);
     if (*lpcbData < sizeof(DWORD)) return ERROR_NO_MORE_ITEMS;
     DWORD *lpcbData_dword = reinterpret_cast<DWORD *>(lpData);
     *lpcbData_dword = location[dwIndex].value;
@@ -378,7 +346,8 @@ LSTATUS __stdcall ShimRegCloseKey(HKEY hKey) {
             return ERROR_SUCCESS;
         }
     }
-    return ERROR_SUCCESS;
+    // means that RegCloseKey was called with an invalid key value (one that doesn't exist or has already been closed)
+    exit(-1);
 }
 
 // Windows app package shims
@@ -401,7 +370,12 @@ LONG WINAPI ShimGetPackagesByPackageFamily(_In_ PCWSTR packageFamilyName, _Inout
         *bufferLength = ARRAYSIZE(package_full_name);
         if (too_small) return ERROR_INSUFFICIENT_BUFFER;
 
-        wcscpy(buffer, package_full_name);
+        for (size_t i = 0; i < sizeof(package_full_name) / sizeof(wchar_t); i++) {
+            if (i >= *bufferLength) {
+                break;
+            }
+            buffer[i] = package_full_name[i];
+        }
         *packageFullNames = buffer;
         return 0;
     }
@@ -422,7 +396,12 @@ LONG WINAPI ShimGetPackagePathByFullName(_In_ PCWSTR packageFullName, _Inout_ UI
         *pathLength = static_cast<UINT32>(platform_shim.app_package_path.size() + 1);
         return ERROR_INSUFFICIENT_BUFFER;
     }
-    wcscpy(path, platform_shim.app_package_path.c_str());
+    for (size_t i = 0; i < platform_shim.app_package_path.length(); i++) {
+        if (i >= *pathLength) {
+            break;
+        }
+        path[i] = platform_shim.app_package_path.c_str()[i];
+    }
     return 0;
 }
 
